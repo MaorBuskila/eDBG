@@ -1,8 +1,8 @@
 package controller
 
 import (
-	// "fmt"
 	"archive/zip"
+	"eDBG/config"
 	"fmt"
 	"io"
 	"os"
@@ -179,8 +179,10 @@ func (this *ProcMaps) ParseAbsoluteAddress(process *Process, address uint64) (*A
 func (this *ProcMaps) GetAbsoluteAddressNew(address *Address) (uint64, error) {
 	libInfo := address.LibInfo
 	for _, seg := range this.segments {
-		if seg.libName == libInfo.LibName && seg.baseAddr+address.Offset < seg.endAddr {
-			return seg.baseAddr, nil
+		if seg.libName == libInfo.LibName && seg.off == 0 {
+			absAddr := seg.baseAddr + address.Offset
+			config.Debugf("GetAbsoluteAddressNew: loadBase=0x%x + offset=0x%x = 0x%x", seg.baseAddr, address.Offset, absAddr)
+			return absAddr, nil
 		}
 		if strings.HasSuffix(seg.libName, ".apk") {
 			apk_path := seg.libPath
@@ -212,8 +214,10 @@ func (this *Process) GetAbsoluteAddress(address *Address) (uint64, error) {
 	}
 	libInfo := address.LibInfo
 	for _, lib := range DoneLib {
-		if lib.LibInfo.LibName == libInfo.LibName && lib.BaseAddr+address.Offset < lib.EndAddr {
-			return lib.BaseAddr + address.Offset, nil
+		if lib.LibInfo.LibName == libInfo.LibName && lib.Offset == 0 {
+			absAddr := lib.BaseAddr + address.Offset
+			config.Debugf("GetAbsoluteAddress: DoneLib loadBase=0x%x + offset=0x%x = 0x%x", lib.BaseAddr, address.Offset, absAddr)
+			return absAddr, nil
 		}
 	}
 	maps, err := this.GetCurrentMaps()
