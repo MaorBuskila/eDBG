@@ -1,9 +1,11 @@
 package cli
 
 import (
+	"bufio"
 	"eDBG/config"
 	"eDBG/controller"
 	"eDBG/module"
+	"os"
 
 	"eDBG/utils"
 	"encoding/binary"
@@ -31,6 +33,7 @@ type UserConfig struct {
 	Registers     bool
 	Disasm        bool
 	HitOnly       bool
+	ScriptFile    string
 	ThreadFilters []*ThreadFilter
 	Display       []*DisplayInfo
 }
@@ -48,11 +51,12 @@ type Client struct {
 	PreviousCMD    string
 	Working        bool
 	promptInstance *prompt.Prompt
+	ScriptCommands []string
 	HitCount       uint64
 }
 
 func CreateClient(process *controller.Process, library *controller.LibraryInfo, brkManager *module.BreakPointManager, config *UserConfig) *Client {
-	return &Client{
+	c := &Client{
 		Library:        library,
 		Process:        process,
 		BrkManager:     brkManager,
@@ -64,6 +68,12 @@ func CreateClient(process *controller.Process, library *controller.LibraryInfo, 
 		NotifyContinue: make(chan bool, 1),
 		PreviousCMD:    "",
 	}
+	if config.ScriptFile != "" {
+		if err := c.LoadScript(config.ScriptFile); err != nil {
+			fmt.Printf("Failed to load script: %v\n", err)
+		}
+	}
+	return c
 }
 
 func (this *Client) Run() {
@@ -128,6 +138,55 @@ func (this *Client) HitOnlyOutput() {
 	this.HitCount++
 	fmt.Printf("\n%s[Hit #%d]%s\n", config.YELLOW, this.HitCount, config.NC)
 	this.OutputInfo()
+	if len(this.ScriptCommands) > 0 {
+		fmt.Print(config.BLUE)
+		fmt.Println("──────────────────────────────────────[  SCRIPT  ]────────────────────────────────────────")
+		fmt.Print(config.NC)
+		this.ExecuteScript()
+		fmt.Print(config.BLUE)
+		fmt.Println("─────────────────────────────────────────────────────────────────────────────────────────")
+		fmt.Print(config.NC)
+	}
+}
+
+func (this *Client) LoadScript(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		this.ScriptCommands = append(this.ScriptCommands, line)
+	}
+	fmt.Printf("Loaded %d script commands from %s\n", len(this.ScriptCommands), path)
+	return scanner.Err()
+}
+
+var hitOnlyBlockedCmds = map[string]bool{
+	"continue": true, "c": true, "run": true, "r": true,
+	"step": true, "s": true, "next": true, "n": true,
+	"finish": true, "fi": true, "until": true, "u": true,
+	"break": true, "b": true, "vbreak": true, "vb": true,
+	"hbreak": true, "hb": true, "watch": true, "rwatch": true,
+	"enable": true, "disable": true, "delete": true,
+	"write": true, "w": true, "quit": true, "q": true,
+	"return": true, "jump": true, "j": true,
+	"thread": true, "t": true,
+}
+
+func (this *Client) ExecuteScript() {
+	for _, line := range this.ScriptCommands {
+		cmd := strings.Fields(line)[0]
+		if hitOnlyBlockedCmds[cmd] {
+			continue
+		}
+		this.executeCommand(line)
+	}
 }
 
 func (this *Client) PrintDisplay() {

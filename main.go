@@ -113,6 +113,8 @@ func main() {
 		mcpPort         int
 		hitOnly         bool
 		hitOnlyShort    bool
+		scriptFile      string
+		scriptFileShort string
 		uid             uint
 		// vertual			bool
 	)
@@ -141,11 +143,17 @@ func main() {
 	flag.IntVar(&mcpPort, "mcp-port", 19810, "Port used by the MCP server")
 	flag.BoolVar(&hitOnly, "hit-only", false, "Trace breakpoint hits without stopping the target process")
 	flag.BoolVar(&hitOnlyShort, "ho", false, "Trace breakpoint hits without stopping the target process (shorthand)")
+	flag.StringVar(&scriptFile, "script", "", "Script file to execute on each breakpoint hit")
+	flag.StringVar(&scriptFileShort, "sc", "", "Script file to execute on each breakpoint hit (shorthand)")
 	flag.UintVar(&uid, "u", 0, "Target app UID for process filtering")
 	flag.BoolVar(&config.Verbose, "v", false, "Verbose debug output")
 	flag.Parse()
 	config.TargetUID = uint32(uid)
 	config.HitOnly = hitOnly || hitOnlyShort
+	actualScriptFile := scriptFile
+	if actualScriptFile == "" {
+		actualScriptFile = scriptFileShort
+	}
 	config.DisablePackageCheck = disablePkgChk
 
 	if mcpMode {
@@ -245,9 +253,10 @@ func main() {
 	brkManager := module.CreateBreakPointManager(eventListener, btfFile, process)
 	brkManager.TargetLibName = libName
 	client := cli.CreateClient(process, library, brkManager, &cli.UserConfig{
-		Registers: !hidreg,
-		Disasm:    !hiddis,
-		HitOnly:   config.HitOnly,
+		Registers:  !hidreg,
+		Disasm:     !hiddis,
+		HitOnly:    config.HitOnly,
+		ScriptFile: actualScriptFile,
 	})
 	if mcpMode {
 		client.EnableMCPMode()
