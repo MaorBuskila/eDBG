@@ -32,6 +32,7 @@ var FlowTracing = false
 var TargetUID uint32 = 0
 var WaitCtor = false
 var Verbose = false
+var GlobalHWBreak = false
 
 const LinkerCtorSentinelPC uint64 = 0xFFFFFFFE
 const DefaultSonameOffset uint64 = 416

@@ -116,6 +116,12 @@ func main() {
 		scriptFile      string
 		scriptFileShort string
 		uid             uint
+		flowMode        bool
+		flowOver        bool
+		flowMax         int
+		flowRegs        bool
+		flowMem         string
+		flowQuiet       bool
 		// vertual			bool
 	)
 	var brkFlag string
@@ -146,7 +152,14 @@ func main() {
 	flag.StringVar(&scriptFile, "script", "", "Script file to execute on each breakpoint hit")
 	flag.StringVar(&scriptFileShort, "sc", "", "Script file to execute on each breakpoint hit (shorthand)")
 	flag.UintVar(&uid, "u", 0, "Target app UID for process filtering")
+	flag.BoolVar(&flowMode, "flow", false, "Run flow trace on -b address and exit")
+	flag.BoolVar(&flowOver, "flow-over", false, "Flow: step over calls instead of into")
+	flag.IntVar(&flowMax, "flow-max", 10000, "Flow: max number of steps")
+	flag.BoolVar(&flowRegs, "flow-regs", false, "Flow: include registers in CSV")
+	flag.StringVar(&flowMem, "flow-mem", "", "Flow: dereference register each step, e.g., X0")
+	flag.BoolVar(&flowQuiet, "flow-quiet", false, "Flow: suppress per-step output")
 	flag.BoolVar(&config.Verbose, "v", false, "Verbose debug output")
+	flag.BoolVar(&config.GlobalHWBreak, "global-hwbrk", false, "Use system-wide (pid=-1) HW breakpoints instead of per-TID")
 	flag.Parse()
 	config.TargetUID = uint32(uid)
 	config.HitOnly = hitOnly || hitOnlyShort
@@ -163,6 +176,11 @@ func main() {
 
 	if brkFlag != "" && vbkFlag != "" {
 		fmt.Println("Error: Cannot use both -b (file offset) and -vb (virtual offset) flags simultaneously.")
+		os.Exit(1)
+	}
+
+	if flowMode && brkFlag == "" && vbkFlag == "" {
+		fmt.Println("Error: -flow requires -b or -vb to specify the target address.")
 		os.Exit(1)
 	}
 
@@ -252,11 +270,13 @@ func main() {
 	eventListener := event.CreateEventListener(process)
 	brkManager := module.CreateBreakPointManager(eventListener, btfFile, process)
 	brkManager.TargetLibName = libName
+	brkManager.FlowMode = flowMode
 	client := cli.CreateClient(process, library, brkManager, &cli.UserConfig{
 		Registers:  !hidreg,
 		Disasm:     !hiddis,
 		HitOnly:    config.HitOnly,
 		ScriptFile: actualScriptFile,
+		FlowMode:   flowMode,
 	})
 	if mcpMode {
 		client.EnableMCPMode()
@@ -337,6 +357,28 @@ func main() {
 		}
 	}
 
+	var flowRVAStr string
+	if flowMode && library != nil {
+		var firstAddr uint64
+		if vbkFlag != "" {
+			addrs, _ := ParseBreakPoints(vbkFlag)
+			if len(addrs) > 0 {
+				firstAddr = addrs[0]
+			}
+		} else {
+			addrs, _ := ParseBreakPoints(brkFlag)
+			if len(addrs) > 0 {
+				rva, convErr := utils.ConvertFileOffsetToVirtualOffset(library.LibPath, addrs[0])
+				if convErr != nil {
+					fmt.Printf("Failed to convert file offset 0x%x to RVA: %v\n", addrs[0], convErr)
+					os.Exit(1)
+				}
+				firstAddr = rva
+			}
+		}
+		flowRVAStr = fmt.Sprintf("0x%x", firstAddr)
+	}
+
 	eventListener.SetupClient(client)
 	err = brkManager.Init()
 	if err != nil {
@@ -379,7 +421,48 @@ func main() {
 
 		client.Run()
 		eventListener.Run()
-		<-stopper
+
+		if flowMode {
+			if brkManager.IsWaitingForLoad() {
+				fmt.Println("Waiting for library to load...")
+				timeout := time.After(5 * time.Minute)
+			waitLoop:
+				for {
+					select {
+					case <-stopper:
+						fmt.Println("\nInterrupted while waiting for library load.")
+						os.Exit(0)
+					case <-timeout:
+						fmt.Println("Timeout: library was not loaded within 5 minutes.")
+						os.Exit(1)
+					default:
+						if !brkManager.IsWaitingForLoad() {
+							break waitLoop
+						}
+						time.Sleep(20 * time.Millisecond)
+					}
+				}
+			}
+			flowArgs := []string{flowRVAStr}
+			if flowOver {
+				flowArgs = append(flowArgs, "--over")
+			}
+			if flowMax != 10000 {
+				flowArgs = append(flowArgs, "--max", strconv.Itoa(flowMax))
+			}
+			if flowRegs {
+				flowArgs = append(flowArgs, "--regs")
+			}
+			if flowMem != "" {
+				flowArgs = append(flowArgs, "--mem", flowMem)
+			}
+			if flowQuiet {
+				flowArgs = append(flowArgs, "--quiet")
+			}
+			client.HandleFlow(flowArgs)
+		} else {
+			<-stopper
+		}
 	}
 
 	fmt.Println("Quiting eDBG...")

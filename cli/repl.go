@@ -35,6 +35,7 @@ type UserConfig struct {
 	Disasm        bool
 	HitOnly       bool
 	ScriptFile    string
+	FlowMode      bool
 	ThreadFilters []*ThreadFilter
 	Display       []*DisplayInfo
 }
@@ -49,6 +50,7 @@ type Client struct {
 	Done           chan bool
 	DoClean        chan bool
 	NotifyContinue chan bool
+	FlowStepDone   chan bool
 	PreviousCMD    string
 	Working        bool
 	promptInstance *prompt.Prompt
@@ -67,6 +69,7 @@ func CreateClient(process *controller.Process, library *controller.LibraryInfo, 
 		Done:           make(chan bool, 1),
 		DoClean:        make(chan bool, 1),
 		NotifyContinue: make(chan bool, 1),
+		FlowStepDone:   make(chan bool, 1),
 		PreviousCMD:    "",
 	}
 	if config.ScriptFile != "" {
@@ -87,13 +90,17 @@ func (this *Client) Run() {
 	go func() {
 		for {
 			<-this.Incoming
-			// fmt.Println("Incoming!")
 			this.OutputInfo()
-
+			if config.FlowTracing {
+				select {
+				case this.FlowStepDone <- true:
+				default:
+				}
+			}
 		}
 	}()
 	go func() {
-		if !this.IsMCPMode() {
+		if !this.IsMCPMode() && !this.Config.FlowMode {
 			this.REPL()
 		}
 	}()
@@ -102,6 +109,9 @@ func (this *Client) Run() {
 func (this *Client) OutputInfo() {
 	if this.ShouldSuppressOutput() {
 		return
+	}
+	if this.Process != nil {
+		fmt.Printf("%spid=%d tid=%d%s\n", config.CYAN, this.Process.WorkPid, this.Process.WorkTid, config.NC)
 	}
 	if this.Config.Registers {
 		fmt.Print(config.BLUE)
@@ -753,7 +763,7 @@ func (this *Client) HandleFinish() bool {
 
 func (this *Client) CleanUp() {
 	this.Process.Continue()
-	_ = this.BrkManager.Stop()
+	_ = this.BrkManager.StopAll()
 	syscall.Kill(syscall.Getpid(), syscall.SIGTERM)
 }
 
@@ -929,6 +939,7 @@ func (this *Client) HandleUntil(args []string) bool {
 func (this *Client) HandleFlow(args []string) {
 	if len(args) == 0 {
 		fmt.Println("Usage: flow <rva> [--over] [--max N] [--regs] [--mem <reg>] [--quiet]")
+		fmt.Println("  CLI: eDBG -p <pkg> -l <lib> -flow <rva> [-v]")
 		return
 	}
 
@@ -986,6 +997,8 @@ func (this *Client) HandleFlow(args []string) {
 		return
 	}
 
+	_ = this.BrkManager.StopAll()
+
 	address := controller.NewAddress(this.Library, fileOffset)
 	absolute, err := this.Process.GetAbsoluteAddress(address)
 	if err != nil {
@@ -994,10 +1007,17 @@ func (this *Client) HandleFlow(args []string) {
 	}
 	address.Absolute = absolute
 
-	if err = this.BrkManager.CreateHWBreakPoint(address, true, config.HW_BREAKPOINT_X); err != nil {
+	config.Debugf("flow: rva=0x%x fileOffset=0x%x abs=0x%x max=%d stepOver=%v memReg=%s", rva, fileOffset, absolute, maxSteps, stepOver, memReg)
+
+	tid := this.Process.WorkTid
+	if tid == 0 {
+		tid = this.Process.WorkPid
+	}
+	if err = this.BrkManager.SetTempBreak(address, tid); err != nil {
 		fmt.Printf("Failed to set initial HW breakpoint: %v\n", err)
 		return
 	}
+	config.Debugf("flow: temp HW bp set at abs=0x%x tid=%d", absolute, tid)
 
 	libName := this.Library.LibName
 	csvPath := fmt.Sprintf("/data/local/tmp/%s_0x%x_flow.csv", strings.TrimSuffix(libName, ".so"), rva)
@@ -1023,27 +1043,36 @@ func (this *Client) HandleFlow(args []string) {
 	fmt.Printf("Flow trace: 0x%x → %s, max %d steps, output: %s\n", rva, csvPath, maxSteps, csvPath)
 
 	config.FlowTracing = true
+	this.BrkManager.FlowEntryAbs = absolute
 	defer func() {
 		config.FlowTracing = false
+		this.BrkManager.FlowEntryAbs = 0
 	}()
 
-	if !this.HandleContinue() {
-		writer.Flush()
-		csvFile.Close()
-		return
+	config.Debugf("flow: waiting for initial hit")
+	if len(this.Process.StoppedPid) > 0 {
+		if !this.HandleContinue() {
+			writer.Flush()
+			csvFile.Close()
+			return
+		}
+	} else {
+		if err := this.BrkManager.SetupProbe(); err != nil {
+			fmt.Printf("Failed to start probes: %v\n", err)
+			writer.Flush()
+			csvFile.Close()
+			return
+		}
+		this.Working = false
 	}
+
+	<-this.FlowStepDone
 
 	var savedLR uint64
 	stepCount := 0
 	interrupted := false
 
 	for stepCount < maxSteps {
-		_, ok := <-this.Incoming
-		if !ok {
-			interrupted = true
-			break
-		}
-
 		ctx := this.Process.Context
 		pc := ctx.PC
 
@@ -1061,6 +1090,8 @@ func (this *Client) HandleFlow(args []string) {
 				currentRVA = addrInfo.Offset
 			}
 		}
+
+		config.Debugf("flow: step=%d pid=%d tid=%d pc=0x%x rva=0x%x lr=0x%x sp=0x%x", stepCount, this.Process.WorkPid, this.Process.WorkTid, pc, currentRVA, ctx.LR, ctx.SP)
 
 		row := []string{
 			strconv.Itoa(stepCount),
@@ -1096,62 +1127,43 @@ func (this *Client) HandleFlow(args []string) {
 
 		if !quiet {
 			fmt.Printf("\n%s[Flow Step #%d]%s\n", config.YELLOW, stepCount, config.NC)
-			this.OutputInfo()
 		}
 
-		stepCount++
-
 		if pc == savedLR {
-			fmt.Printf("%sFlow trace complete: PC reached saved LR (0x%x) after %d steps.%s\n", config.GREEN, savedLR, stepCount, config.NC)
+			fmt.Printf("%sFlow trace complete: PC reached saved LR (0x%x) after %d steps.%s\n", config.GREEN, savedLR, stepCount+1, config.NC)
+			config.Debugf("flow: exit reason=reached_LR steps=%d pc=0x%x lr=0x%x", stepCount+1, pc, savedLR)
 			break
 		}
 
-		if stepCount >= maxSteps {
+		if stepCount+1 >= maxSteps {
 			fmt.Printf("%sFlow trace stopped: reached max steps (%d).%s\n", config.YELLOW, maxSteps, config.NC)
+			config.Debugf("flow: exit reason=max_steps steps=%d pc=0x%x lr=0x%x", stepCount+1, pc, savedLR)
 			break
 		}
 
 		stepInto := !stepOver
-		nextPC, err := utils.PredictNextPC(this.Process.WorkPid, this.Process.Context, stepInto)
-		if nextPC == 0xDEADBEEF {
-			target, err := utils.GetTarget(this.Process.WorkPid, this.Process.Context)
-			if err != nil {
-				fmt.Printf("Failed to get branch target at step %d: %v\n", stepCount, err)
-				interrupted = true
-				break
-			}
-			addr1, err := this.Process.ParseAddress(uint64(this.Process.Context.GetPC() + 4))
-			if err != nil {
-				fmt.Printf("Failed to parse fall-through address: %v\n", err)
-				interrupted = true
-				break
-			}
-			this.BrkManager.SetTempBreak(addr1, this.Process.WorkTid)
-			addr2, err := this.Process.ParseAddress(uint64(target))
-			if err != nil {
-				fmt.Printf("Failed to parse branch target address: %v\n", err)
-				interrupted = true
-				break
-			}
-			this.BrkManager.SetTempBreak(addr2, this.Process.WorkTid)
-		} else if err != nil {
-			fmt.Printf("Failed to predict next PC at step %d: %v\n", stepCount, err)
+		config.Debugf("flow: predicting next pc, stepInto=%v", stepInto)
+		var ok bool
+		if stepOver {
+			ok = this.HandleNext()
+		} else {
+			ok = this.HandleStep()
+		}
+		if !ok {
+			fmt.Printf("Failed to predict next PC at step %d\n", stepCount)
+			config.Debugf("flow: exit reason=predict_failed steps=%d pc=0x%x lr=0x%x", stepCount, pc, savedLR)
 			interrupted = true
 			break
-		} else {
-			nextAddr, err := this.Process.ParseAddress(uint64(nextPC))
-			if err != nil {
-				fmt.Printf("Failed to parse next address: %v\n", err)
-				interrupted = true
-				break
-			}
-			this.BrkManager.SetTempBreak(nextAddr, this.Process.WorkTid)
 		}
 
 		if !this.HandleContinue() {
 			interrupted = true
+			config.Debugf("flow: exit reason=continue_failed steps=%d pc=0x%x lr=0x%x", stepCount, pc, savedLR)
 			break
 		}
+
+		<-this.FlowStepDone
+		stepCount++
 	}
 
 	writer.Flush()
@@ -1161,14 +1173,6 @@ func (this *Client) HandleFlow(args []string) {
 		fmt.Printf("%sFlow trace interrupted after %d steps. Partial trace saved to %s%s\n", config.YELLOW, stepCount, csvPath, config.NC)
 	} else {
 		fmt.Printf("Trace saved to %s (%d steps)\n", csvPath, stepCount)
-	}
-
-	for _, brk := range this.BrkManager.BreakPoints {
-		if !brk.Deleted && brk.Hardware && brk.Addr.Absolute == absolute {
-			brk.Deleted = true
-			brk.Enable = false
-			break
-		}
 	}
 }
 

@@ -15,12 +15,13 @@ type IEventListener interface {
 }
 
 type BreakPoint struct {
-	Addr     *controller.Address
-	Enable   bool
-	Deleted  bool
-	Hardware bool
-	Pid      uint32
-	Type     int
+	Addr      *controller.Address
+	Enable    bool
+	Deleted   bool
+	Hardware  bool
+	Temporary bool
+	Pid       uint32
+	Type      int
 }
 
 type BreakPointManager struct {
@@ -33,6 +34,8 @@ type BreakPointManager struct {
 	TargetLibName       string
 	pendingHWBreaks     []*controller.Address
 	waitingForLoad      bool
+	FlowMode            bool
+	FlowEntryAbs        uint64
 }
 
 func CreateBreakPointManager(listener IEventListener, BTF_File string, process *controller.Process) *BreakPointManager {
@@ -69,11 +72,12 @@ func (this *BreakPointManager) SetTempBreak(address *controller.Address, tid uin
 	}
 
 	brk := &BreakPoint{
-		Addr:    address,
-		Enable:  true,
-		Deleted: false,
-		Pid:     this.process.WorkPid,
-		Type:    config.HW_BREAKPOINT_X,
+		Addr:      address,
+		Enable:    true,
+		Deleted:   false,
+		Temporary: true,
+		Pid:       tid,
+		Type:      config.HW_BREAKPOINT_X,
 	}
 
 	switch config.Preference {
@@ -177,7 +181,22 @@ func (this *BreakPointManager) SetupProbe() error {
 	if len(this.temporaryBreakPoint) == 0 {
 		this.TempBreakTid = 0
 	}
-	err := this.ProbeHandler.SetupManager(append(this.temporaryBreakPoint, this.BreakPoints...))
+	brks := this.BreakPoints
+	if config.FlowTracing && this.FlowEntryAbs != 0 {
+		if len(this.temporaryBreakPoint) > 0 {
+			this.ProbeHandler.CloseHWBreakAtAddress(this.FlowEntryAbs)
+		}
+		brks = make([]*BreakPoint, 0, len(this.BreakPoints))
+		for _, brk := range this.BreakPoints {
+			if brk.Hardware && !brk.Deleted {
+				if len(this.temporaryBreakPoint) > 0 || brk.Addr.Absolute != this.FlowEntryAbs {
+					continue
+				}
+			}
+			brks = append(brks, brk)
+		}
+	}
+	err := this.ProbeHandler.SetupManager(append(this.temporaryBreakPoint, brks...))
 	if err != nil {
 		return err
 	}
@@ -214,6 +233,10 @@ func (this *BreakPointManager) Start(addresss []*controller.Address) error {
 		if needWait {
 			return this.startLinkerCtorWait(addresss)
 		}
+	}
+
+	if this.FlowMode {
+		return nil
 	}
 
 	for _, addr := range addresss {
@@ -281,6 +304,12 @@ func (this *BreakPointManager) OnLinkerCtorHit() error {
 	config.Debugf("OnLinkerCtorHit: PidList=%v WorkPid=%d", this.process.PidList, this.process.WorkPid)
 	this.process.UpdateMaps()
 
+	if this.FlowMode {
+		config.Debugf("OnLinkerCtorHit: FlowMode, skipping breakpoint setup")
+		this.pendingHWBreaks = nil
+		return nil
+	}
+
 	for _, addr := range this.pendingHWBreaks {
 		config.Debugf("OnLinkerCtorHit: resolving %s+0x%x", addr.LibInfo.LibName, addr.Offset)
 		absAddr, err := this.process.GetAbsoluteAddress(addr)
@@ -310,6 +339,15 @@ func (this *BreakPointManager) IsWaitingForLoad() bool {
 func (this *BreakPointManager) Stop() error {
 	this.ProbeHandler.StopLinkerProbe()
 	err := this.ProbeHandler.Stop()
+	if err == nil {
+		this.Running = false
+	}
+	return err
+}
+
+func (this *BreakPointManager) StopAll() error {
+	this.ProbeHandler.StopLinkerProbe()
+	err := this.ProbeHandler.StopAll()
 	if err == nil {
 		this.Running = false
 	}

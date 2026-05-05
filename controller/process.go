@@ -179,8 +179,10 @@ func (this *Process) Continue() error {
 			Continued[pid] = true
 		}
     }
-	this.StoppedPid = []uint32{}
-	this.WorkPid = 0
+	if len(this.StoppedPid) > 0 {
+		this.StoppedPid = []uint32{}
+		this.WorkPid = 0
+	}
 	return nil
 }
 

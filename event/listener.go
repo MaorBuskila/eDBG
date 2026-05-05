@@ -89,13 +89,6 @@ func (this *EventListener) hitOnlyDispatch(data []byte) {
 	this.client.NotifyContinue <- true
 }
 
-func (this *EventListener) flowDispatch(data []byte) {
-	this.process.Context = this.parseContext(data)
-	this.client.Incoming <- true
-	this.client.Working = false
-	this.client.NotifyContinue <- true
-}
-
 func (this *EventListener) dispatchEvent(data []byte, PC uint64) {
 	if config.HitOnly {
 		if PC == 0xFFFFFFFF {
@@ -103,15 +96,6 @@ func (this *EventListener) dispatchEvent(data []byte, PC uint64) {
 			this.hitOnlyDispatch(dataRaw.RawSample[12:])
 		} else {
 			this.hitOnlyDispatch(data)
-		}
-		return
-	}
-	if config.FlowTracing {
-		if PC == 0xFFFFFFFF {
-			dataRaw := <-this.Record
-			this.flowDispatch(dataRaw.RawSample[12:])
-		} else {
-			this.flowDispatch(data)
 		}
 		return
 	}
@@ -201,7 +185,7 @@ func (this *EventListener) WorkEvent(data []byte) {
 		dataPtr := bo.Uint64(data[12+8*28 : 12+8*29])
 		strSize := bo.Uint64(data[12+8*29 : 12+8*30])
 		soinfoPtr := bo.Uint64(data[12+8*30 : 12+8*31])
-		fmt.Printf("[DEBUG] LinkerLib: pid=%d soinfo=0x%x data_ptr=0x%x str_size=%d str=%q\n",
+		config.Debugf("LinkerLib: pid=%d soinfo=0x%x data_ptr=0x%x str_size=%d str=%q",
 			this.pid, soinfoPtr, dataPtr, strSize, libStr)
 		this.client.Working = false
 		this.client.NotifyContinue <- true

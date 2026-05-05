@@ -74,7 +74,13 @@ func (this *ProbeHandler) SetupManagerOptions() error {
 
 func (this *ProbeHandler) SetupManager(brks []*BreakPoint) error {
     perf := false
-    this.Perfs = []*PerfBreaks{}
+    livePerfs := make([]*PerfBreaks, 0, len(this.Perfs))
+    for _, p := range this.Perfs {
+        if p.Live {
+            livePerfs = append(livePerfs, p)
+        }
+    }
+    this.Perfs = livePerfs
     probes := []*manager.Probe{}
     usedCount := 0
     for i, brk := range brks {
@@ -82,7 +88,7 @@ func (this *ProbeHandler) SetupManager(brks []*BreakPoint) error {
             continue
         }
         if brk.Hardware {
-            this.AddHWBreak(brk.Pid, brk.Addr.Absolute, brk.Type)
+            this.AddHWBreak(brk.Pid, brk.Addr.Absolute, brk.Type, brk.Temporary)
             perf = true
             continue
         }
@@ -107,7 +113,7 @@ func (this *ProbeHandler) SetupManager(brks []*BreakPoint) error {
     }
     
 
-    if len(probes) == 0 {
+    if len(probes) == 0 && !perf {
         fmt.Println("WARNING: No valid uprobe breakpoints set.")
         // return fmt.Errorf("No valid reakpoints")
     }
@@ -181,7 +187,15 @@ func (this *ProbeHandler) setHitOnlyConfig() error {
 }
 
 func (this *ProbeHandler) Stop() error {
-    this.CloseHWBreak()
+    this.CloseTempHWBreak()
+    if this.bpfManager == nil {
+        return nil
+    }
+    return this.bpfManager.Stop(manager.CleanAll)
+}
+
+func (this *ProbeHandler) StopAll() error {
+    this.CloseAllHWBreak()
     if this.bpfManager == nil {
         return nil
     }
