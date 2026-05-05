@@ -28,6 +28,7 @@ var NC = "\033[0m"
 var DisablePackageCheck = false
 var SHOW_VERTUAL = false
 var HitOnly = false
+var FlowTracing = false
 var TargetUID uint32 = 0
 var WaitCtor = false
 var Verbose = false

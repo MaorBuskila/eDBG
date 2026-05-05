@@ -9,6 +9,7 @@ import (
 
 	"eDBG/utils"
 	"encoding/binary"
+	"encoding/csv"
 	"fmt"
 	"strconv"
 	"strings"
@@ -310,6 +311,8 @@ func (this *Client) executeCommand(line string) {
 		}
 	// case "run", "r":
 	// 	fmt.Println("eDBG DO NOT execute programs. Please run it manually.")
+	case "flow":
+		this.HandleFlow(args)
 	case "set":
 		this.HandleSet(args)
 	case "write", "w":
@@ -353,6 +356,7 @@ func (this *Client) completer(d prompt.Document) []prompt.Suggest {
 		{Text: "write", Description: "Write memory"},
 		{Text: "backtrace1", Description: "Show the current stack frame (call stack) [bt1]"},
 		{Text: "backtrace", Description: "Show the current stack frame (call stack) [bt]"},
+		{Text: "flow", Description: "Trace execution flow from RVA until return"},
 	}
 	return prompt.FilterHasPrefix(s, d.GetWordBeforeCursor(), true)
 }
@@ -874,6 +878,271 @@ func (this *Client) HandleUntil(args []string) bool {
 		// this.HandleContinue()
 	}
 	return true
+}
+
+func (this *Client) HandleFlow(args []string) {
+	if len(args) == 0 {
+		fmt.Println("Usage: flow <rva> [--over] [--max N] [--regs] [--mem <reg>] [--quiet]")
+		return
+	}
+
+	quiet := false
+	stepOver := false
+	showRegs := false
+	memReg := ""
+	maxSteps := 10000
+
+	rvaStr := args[0]
+	for i := 1; i < len(args); i++ {
+		switch args[i] {
+		case "--quiet":
+			quiet = true
+		case "--over":
+			stepOver = true
+		case "--regs":
+			showRegs = true
+		case "--mem":
+			if i+1 < len(args) {
+				i++
+				memReg = strings.ToUpper(args[i])
+			} else {
+				fmt.Println("--mem requires a register name (e.g. X0)")
+				return
+			}
+		case "--max":
+			if i+1 < len(args) {
+				i++
+				v, err := strconv.Atoi(args[i])
+				if err != nil || v <= 0 {
+					fmt.Println("--max requires a positive integer")
+					return
+				}
+				maxSteps = v
+			} else {
+				fmt.Println("--max requires a value")
+				return
+			}
+		default:
+			fmt.Printf("Unknown flag: %s\n", args[i])
+			return
+		}
+	}
+
+	rva, err := strconv.ParseUint(rvaStr, 0, 64)
+	if err != nil {
+		fmt.Printf("Bad RVA: %v\n", err)
+		return
+	}
+
+	fileOffset, err := utils.ConvertVirtualOffsetToFileOffset(this.Library.LibPath, rva)
+	if err != nil {
+		fmt.Printf("Failed to convert RVA 0x%x to file offset: %v\n", rva, err)
+		return
+	}
+
+	address := controller.NewAddress(this.Library, fileOffset)
+	absolute, err := this.Process.GetAbsoluteAddress(address)
+	if err != nil {
+		fmt.Printf("Failed to resolve absolute address: %v\n", err)
+		return
+	}
+	address.Absolute = absolute
+
+	if err = this.BrkManager.CreateHWBreakPoint(address, true, config.HW_BREAKPOINT_X); err != nil {
+		fmt.Printf("Failed to set initial HW breakpoint: %v\n", err)
+		return
+	}
+
+	libName := this.Library.LibName
+	csvPath := fmt.Sprintf("/data/local/tmp/%s_0x%x_flow.csv", strings.TrimSuffix(libName, ".so"), rva)
+	csvFile, err := os.Create(csvPath)
+	if err != nil {
+		fmt.Printf("Failed to create CSV file %s: %v\n", csvPath, err)
+		return
+	}
+	writer := csv.NewWriter(csvFile)
+
+	header := []string{"step", "va", "rva"}
+	if showRegs {
+		for i := 0; i < 30; i++ {
+			header = append(header, fmt.Sprintf("x%d", i))
+		}
+		header = append(header, "lr", "sp", "pc", "pstate")
+	}
+	if memReg != "" {
+		header = append(header, "mem_addr", "mem_value")
+	}
+	writer.Write(header)
+
+	fmt.Printf("Flow trace: 0x%x → %s, max %d steps, output: %s\n", rva, csvPath, maxSteps, csvPath)
+
+	config.FlowTracing = true
+	defer func() {
+		config.FlowTracing = false
+	}()
+
+	if !this.HandleContinue() {
+		writer.Flush()
+		csvFile.Close()
+		return
+	}
+
+	var savedLR uint64
+	stepCount := 0
+	interrupted := false
+
+	for stepCount < maxSteps {
+		_, ok := <-this.Incoming
+		if !ok {
+			interrupted = true
+			break
+		}
+
+		ctx := this.Process.Context
+		pc := ctx.PC
+
+		if stepCount == 0 {
+			savedLR = ctx.LR
+		}
+
+		var currentRVA uint64
+		addrInfo, err := this.Process.ParseAddress(pc)
+		if err == nil {
+			converted, convErr := utils.ConvertFileOffsetToVirtualOffset(addrInfo.LibInfo.LibPath, addrInfo.Offset)
+			if convErr == nil {
+				currentRVA = converted
+			} else {
+				currentRVA = addrInfo.Offset
+			}
+		}
+
+		row := []string{
+			strconv.Itoa(stepCount),
+			fmt.Sprintf("0x%x", pc),
+			fmt.Sprintf("0x%x", currentRVA),
+		}
+		if showRegs {
+			for i := 0; i < 30; i++ {
+				if i < len(ctx.Regs) {
+					row = append(row, fmt.Sprintf("0x%x", ctx.Regs[i]))
+				} else {
+					row = append(row, "0x0")
+				}
+			}
+			row = append(row, fmt.Sprintf("0x%x", ctx.LR))
+			row = append(row, fmt.Sprintf("0x%x", ctx.SP))
+			row = append(row, fmt.Sprintf("0x%x", ctx.PC))
+			row = append(row, fmt.Sprintf("0x%x", ctx.Pstate))
+		}
+		if memReg != "" {
+			regVal := this.resolveRegValue(memReg, ctx)
+			memData := make([]byte, 8)
+			n, memErr := utils.ReadProcessMemory(this.Process.WorkPid, uintptr(regVal), memData)
+			if memErr == nil && n >= 8 {
+				row = append(row, fmt.Sprintf("0x%x", regVal))
+				row = append(row, fmt.Sprintf("0x%x", binary.LittleEndian.Uint64(memData)))
+			} else {
+				row = append(row, fmt.Sprintf("0x%x", regVal))
+				row = append(row, "ERR")
+			}
+		}
+		writer.Write(row)
+
+		if !quiet {
+			fmt.Printf("\n%s[Flow Step #%d]%s\n", config.YELLOW, stepCount, config.NC)
+			this.OutputInfo()
+		}
+
+		stepCount++
+
+		if pc == savedLR {
+			fmt.Printf("%sFlow trace complete: PC reached saved LR (0x%x) after %d steps.%s\n", config.GREEN, savedLR, stepCount, config.NC)
+			break
+		}
+
+		if stepCount >= maxSteps {
+			fmt.Printf("%sFlow trace stopped: reached max steps (%d).%s\n", config.YELLOW, maxSteps, config.NC)
+			break
+		}
+
+		stepInto := !stepOver
+		nextPC, err := utils.PredictNextPC(this.Process.WorkPid, this.Process.Context, stepInto)
+		if nextPC == 0xDEADBEEF {
+			target, err := utils.GetTarget(this.Process.WorkPid, this.Process.Context)
+			if err != nil {
+				fmt.Printf("Failed to get branch target at step %d: %v\n", stepCount, err)
+				interrupted = true
+				break
+			}
+			addr1, err := this.Process.ParseAddress(uint64(this.Process.Context.GetPC() + 4))
+			if err != nil {
+				fmt.Printf("Failed to parse fall-through address: %v\n", err)
+				interrupted = true
+				break
+			}
+			this.BrkManager.SetTempBreak(addr1, this.Process.WorkTid)
+			addr2, err := this.Process.ParseAddress(uint64(target))
+			if err != nil {
+				fmt.Printf("Failed to parse branch target address: %v\n", err)
+				interrupted = true
+				break
+			}
+			this.BrkManager.SetTempBreak(addr2, this.Process.WorkTid)
+		} else if err != nil {
+			fmt.Printf("Failed to predict next PC at step %d: %v\n", stepCount, err)
+			interrupted = true
+			break
+		} else {
+			nextAddr, err := this.Process.ParseAddress(uint64(nextPC))
+			if err != nil {
+				fmt.Printf("Failed to parse next address: %v\n", err)
+				interrupted = true
+				break
+			}
+			this.BrkManager.SetTempBreak(nextAddr, this.Process.WorkTid)
+		}
+
+		if !this.HandleContinue() {
+			interrupted = true
+			break
+		}
+	}
+
+	writer.Flush()
+	csvFile.Close()
+
+	if interrupted {
+		fmt.Printf("%sFlow trace interrupted after %d steps. Partial trace saved to %s%s\n", config.YELLOW, stepCount, csvPath, config.NC)
+	} else {
+		fmt.Printf("Trace saved to %s (%d steps)\n", csvPath, stepCount)
+	}
+
+	for _, brk := range this.BrkManager.BreakPoints {
+		if !brk.Deleted && brk.Hardware && brk.Addr.Absolute == absolute {
+			brk.Deleted = true
+			brk.Enable = false
+			break
+		}
+	}
+}
+
+func (this *Client) resolveRegValue(regName string, ctx *controller.ProcessContext) uint64 {
+	regName = strings.ToUpper(regName)
+	switch regName {
+	case "LR", "X30":
+		return ctx.LR
+	case "SP":
+		return ctx.SP
+	case "PC":
+		return ctx.PC
+	}
+	if strings.HasPrefix(regName, "X") {
+		idx, err := strconv.Atoi(regName[1:])
+		if err == nil && idx >= 0 && idx < len(ctx.Regs) {
+			return ctx.Regs[idx]
+		}
+	}
+	return 0
 }
 
 func (this *Client) HandleHBreak(args []string, Type int) {

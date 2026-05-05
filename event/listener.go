@@ -89,6 +89,13 @@ func (this *EventListener) hitOnlyDispatch(data []byte) {
 	this.client.NotifyContinue <- true
 }
 
+func (this *EventListener) flowDispatch(data []byte) {
+	this.process.Context = this.parseContext(data)
+	this.client.Incoming <- true
+	this.client.Working = false
+	this.client.NotifyContinue <- true
+}
+
 func (this *EventListener) dispatchEvent(data []byte, PC uint64) {
 	if config.HitOnly {
 		if PC == 0xFFFFFFFF {
@@ -96,6 +103,15 @@ func (this *EventListener) dispatchEvent(data []byte, PC uint64) {
 			this.hitOnlyDispatch(dataRaw.RawSample[12:])
 		} else {
 			this.hitOnlyDispatch(data)
+		}
+		return
+	}
+	if config.FlowTracing {
+		if PC == 0xFFFFFFFF {
+			dataRaw := <-this.Record
+			this.flowDispatch(dataRaw.RawSample[12:])
+		} else {
+			this.flowDispatch(data)
 		}
 		return
 	}
