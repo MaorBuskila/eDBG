@@ -136,6 +136,7 @@ func main() {
 	flag.StringVar(&outputfile, "o", "&&NotSetNotSetNotSetO=O", "Save your progress to specified file")
 	flag.BoolVar(&mcpMode, "mcp", false, "Start eDBG in MCP server mode")
 	flag.IntVar(&mcpPort, "mcp-port", 19810, "Port used by the MCP server")
+	flag.BoolVar(&config.Verbose, "v", false, "Verbose debug output")
 	flag.Parse()
 	config.DisablePackageCheck = disablePkgChk
 

@@ -1,5 +1,7 @@
 package config
 
+import "fmt"
+
 const ALL_UPROBE = 0
 const PREFER_UPROBE = 1 // Not Actually used. Same as ALL_UPROBE
 const PREFER_PERF = 2
@@ -25,3 +27,10 @@ var NC = "\033[0m"
 
 var DisablePackageCheck = false
 var SHOW_VERTUAL = false
+var Verbose = false
+
+func Debugf(format string, args ...interface{}) {
+	if Verbose {
+		fmt.Printf("[DEBUG] "+format+"\n", args...)
+	}
+}
