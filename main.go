@@ -238,6 +238,7 @@ func main() {
 
 	eventListener := event.CreateEventListener(process)
 	brkManager := module.CreateBreakPointManager(eventListener, btfFile, process)
+	brkManager.TargetLibName = libName
 	client := cli.CreateClient(process, library, brkManager, &cli.UserConfig{
 		Registers: !hidreg,
 		Disasm:    !hiddis,

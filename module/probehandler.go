@@ -1,20 +1,23 @@
 package module
 
 import (
-    "bytes"
+	"bytes"
+	"eDBG/assets"
+	"eDBG/config"
+	"eDBG/utils"
 	"fmt"
-    "eDBG/utils"
-    "eDBG/assets"
-    "path/filepath"
+	"math"
+	"path/filepath"
+
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/btf"
-    "golang.org/x/sys/unix"
-    "math"
 	manager "github.com/gojue/ebpfmanager"
+	"golang.org/x/sys/unix"
 )
 
 type ProbeHandler struct {
 	bpfManager        *manager.Manager
+	linkerManager     *manager.Manager
     bpfManagerOptions manager.Options
     listener          IEventListener
     BTF_File          string
@@ -161,6 +164,102 @@ func (this *ProbeHandler) Run() error {
 
 func (this *ProbeHandler) Stop() error {
     this.CloseHWBreak()
+    if this.bpfManager == nil {
+        return nil
+    }
     return this.bpfManager.Stop(manager.CleanAll)
+}
+
+func (this *ProbeHandler) SetupLinkerProbe(linkerPath string, ctorOffset uint64, filterLib string, sonameOffset uint64, targetUID uint32) error {
+    config.Debugf("SetupLinkerProbe: linkerPath=%s ctorOffset=0x%x filterLib=%q sonameOffset=%d targetUID=%d",
+        linkerPath, ctorOffset, filterLib, sonameOffset, targetUID)
+
+    sym := utils.RandStringBytes(8)
+    probe := &manager.Probe{
+        Section:          "uprobe/probe_linker",
+        EbpfFuncName:     "probe_linker",
+        AttachToFuncName: sym,
+        RealFilePath:     linkerPath,
+        BinaryPath:       linkerPath,
+        UAddress:         ctorOffset,
+        UprobeOffset:     0,
+    }
+
+    this.linkerManager = &manager.Manager{
+        Probes: []*manager.Probe{probe},
+        PerfMaps: []*manager.PerfMap{
+            {
+                Map: manager.Map{Name: "events"},
+                PerfMapOptions: manager.PerfMapOptions{
+                    DataHandler: this.listener.OnEvent,
+                },
+            },
+        },
+    }
+
+    var bpfFileName = filepath.Join("assets", "ebpf_module.o")
+    byteBuf, err := assets.Asset(bpfFileName)
+    if err != nil {
+        return fmt.Errorf("SetupLinkerProbe: asset load failed: %v", err)
+    }
+
+    if err = this.linkerManager.InitWithOptions(bytes.NewReader(byteBuf), this.bpfManagerOptions); err != nil {
+        return fmt.Errorf("SetupLinkerProbe: init failed: %v", err)
+    }
+    config.Debugf("SetupLinkerProbe: linkerManager initialized OK")
+
+    type linkerFilterT struct {
+        Str [256]byte
+        Len uint32
+    }
+    em, found, err := this.linkerManager.GetMap("linker_filter")
+    if !found || err != nil {
+        return fmt.Errorf("SetupLinkerProbe: linker_filter map not found")
+    }
+    filter := linkerFilterT{}
+    copy(filter.Str[:], filterLib)
+    filter.Len = uint32(len(filterLib))
+    if err = em.Put(uint32(0), filter); err != nil {
+        return fmt.Errorf("SetupLinkerProbe: failed to set linker_filter: %v", err)
+    }
+    config.Debugf("SetupLinkerProbe: linker_filter set: str=%q len=%d", filterLib, filter.Len)
+
+    type linkerConfigT struct {
+        SonameOffset uint64
+    }
+    em2, found, err := this.linkerManager.GetMap("linker_config")
+    if !found || err != nil {
+        return fmt.Errorf("SetupLinkerProbe: linker_config map not found")
+    }
+    if err = em2.Put(uint32(0), linkerConfigT{SonameOffset: sonameOffset}); err != nil {
+        return fmt.Errorf("SetupLinkerProbe: failed to set linker_config: %v", err)
+    }
+    config.Debugf("SetupLinkerProbe: linker_config set: sonameOffset=%d", sonameOffset)
+
+    em3, found, err := this.linkerManager.GetMap("uid_filter")
+    if !found || err != nil {
+        return fmt.Errorf("SetupLinkerProbe: uid_filter map not found")
+    }
+    if err = em3.Put(targetUID, uint32(1)); err != nil {
+        return fmt.Errorf("SetupLinkerProbe: failed to set uid_filter: %v", err)
+    }
+    config.Debugf("SetupLinkerProbe: uid_filter set: uid=%d", targetUID)
+
+    if err = this.linkerManager.Start(); err != nil {
+        return fmt.Errorf("SetupLinkerProbe: start failed: %v", err)
+    }
+    config.Debugf("SetupLinkerProbe: linkerManager started OK")
+
+    fmt.Printf("Linker ctor probe active: waiting for %s to load...\n", filterLib)
+    return nil
+}
+
+func (this *ProbeHandler) StopLinkerProbe() error {
+    if this.linkerManager == nil {
+        return nil
+    }
+    err := this.linkerManager.Stop(manager.CleanAll)
+    this.linkerManager = nil
+    return err
 }
 

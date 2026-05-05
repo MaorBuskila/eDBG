@@ -1,17 +1,17 @@
 package event
 
 import (
+	"eDBG/cli"
+	"eDBG/config"
 	"eDBG/controller"
 	"encoding/binary"
-	"github.com/cilium/ebpf/perf"
-	manager "github.com/gojue/ebpfmanager"
-	"unsafe"
-	// "eDBG/utils"
-	"eDBG/cli"
 	"fmt"
 	"strings"
 	"syscall"
-	// "time"
+	"unsafe"
+
+	"github.com/cilium/ebpf/perf"
+	manager "github.com/gojue/ebpfmanager"
 )
 
 type EventListener struct {
@@ -54,11 +54,7 @@ func getHostByteOrder() binary.ByteOrder {
 	return binary.BigEndian
 }
 
-func (this *EventListener) Workdata(data []byte) {
-	if this.client == nil || this.client.Process == nil {
-		return
-	}
-	<-this.client.Done
+func (this *EventListener) parseContext(data []byte) *controller.ProcessContext {
 	bo := this.ByteOrder
 	context := &controller.ProcessContext{}
 	for i := 12; i < 12+8*30; i += 8 {
@@ -73,7 +69,15 @@ func (this *EventListener) Workdata(data []byte) {
 	} else {
 		context.Pstate = 0xFFFFFFFF
 	}
-	this.client.Process.Context = context
+	return context
+}
+
+func (this *EventListener) Workdata(data []byte) {
+	if this.client == nil || this.client.Process == nil {
+		return
+	}
+	<-this.client.Done
+	this.process.Context = this.parseContext(data)
 	this.client.RecordBreakpointHit()
 	this.client.Incoming <- true
 }
@@ -130,13 +134,49 @@ func (this *EventListener) WorkEvent(data []byte) {
 			break
 		}
 	}
-	// fmt.Println("Event Start:", this.ByteOrder.Uint32(data[4:8]))
 	this.client.Working = true
 	process.UpdatePidList()
 	bo := this.ByteOrder
 	this.pid = bo.Uint32(data[4:8])
 	nowTid := bo.Uint32(data[12+8*34 : 16+8*34])
 	PC := bo.Uint64(data[12+8*32 : 12+8*33])
+
+	config.Debugf("WorkEvent: pid=%d tid=%d PC=0x%x waitingForLoad=%v", this.pid, nowTid, PC, this.client.BrkManager.IsWaitingForLoad())
+
+	if PC == 0xFFFFFFFD {
+		libBytes := data[12 : 12+56]
+		end := 0
+		for i, b := range libBytes {
+			if b == 0 {
+				end = i
+				break
+			}
+			if i == len(libBytes)-1 {
+				end = len(libBytes)
+			}
+		}
+		libStr := string(libBytes[:end])
+		dataPtr := bo.Uint64(data[12+8*28 : 12+8*29])
+		strSize := bo.Uint64(data[12+8*29 : 12+8*30])
+		soinfoPtr := bo.Uint64(data[12+8*30 : 12+8*31])
+		fmt.Printf("[DEBUG] LinkerLib: pid=%d soinfo=0x%x data_ptr=0x%x str_size=%d str=%q\n",
+			this.pid, soinfoPtr, dataPtr, strSize, libStr)
+		this.client.Working = false
+		this.client.NotifyContinue <- true
+		return
+	}
+
+	if PC == config.LinkerCtorSentinelPC && this.client.BrkManager.IsWaitingForLoad() {
+		config.Debugf("WorkEvent: linker ctor sentinel matched! pid=%d", this.pid)
+		process.WorkPid = this.pid
+		if err := this.client.BrkManager.OnLinkerCtorHit(); err != nil {
+			fmt.Printf("Linker ctor hit error: %v\n", err)
+		}
+		syscall.Kill(int(this.pid), syscall.SIGCONT)
+		this.client.Working = false
+		this.client.NotifyContinue <- true
+		return
+	}
 
 	for _, ablepid := range process.PidList {
 		if this.pid == ablepid {
@@ -147,20 +187,11 @@ func (this *EventListener) WorkEvent(data []byte) {
 				if PC == 0xFFFFFFFF {
 					if nowTid == this.client.BrkManager.TempBreakTid {
 						process.WorkTid = nowTid
-						if PC == 0xFFFFFFFF {
-							dataRaw := <-this.Record
-							this.Incomingdata <- dataRaw.RawSample[12:]
-						} else {
-							this.Incomingdata <- data
-						}
-
+						dataRaw := <-this.Record
+						this.Incomingdata <- dataRaw.RawSample[12:]
 						this.client.DoClean <- true
 						return
 					}
-					// 单步调试断点被其他线程命中
-					// 这里默认了如果存在单步调试断点那么下一个触发的一定是单步调试断点
-					// 如果硬件断点失效会出错
-					// fmt.Println("PASSED: SingleStep")
 					this.PassEvent(PC == 0xFFFFFFFF)
 					return
 				}

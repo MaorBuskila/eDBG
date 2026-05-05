@@ -30,6 +30,9 @@ type BreakPointManager struct {
 	ProbeHandler        *ProbeHandler
 	TempBreakTid        uint32
 	Running             bool
+	TargetLibName       string
+	pendingHWBreaks     []*controller.Address
+	waitingForLoad      bool
 }
 
 func CreateBreakPointManager(listener IEventListener, BTF_File string, process *controller.Process) *BreakPointManager {
@@ -192,8 +195,34 @@ func (this *BreakPointManager) Init() error {
 }
 
 func (this *BreakPointManager) Start(addresss []*controller.Address) error {
+	if config.Preference == config.ALL_PERF && len(addresss) > 0 {
+		this.process.UpdatePidList()
+		if len(this.process.PidList) > 0 {
+			this.process.WorkPid = this.process.PidList[0]
+		}
+		config.Debugf("Start: Preference=ALL_PERF, WorkPid=%d, PidList=%v", this.process.WorkPid, this.process.PidList)
+		needWait := false
+		for _, addr := range addresss {
+			absAddr, err := this.process.GetAbsoluteAddress(addr)
+			if err != nil {
+				config.Debugf("Start: GetAbsoluteAddress(%s+0x%x) failed: %v -> entering linker-wait", addr.LibInfo.LibName, addr.Offset, err)
+				needWait = true
+				break
+			}
+			config.Debugf("Start: GetAbsoluteAddress(%s+0x%x) = 0x%x", addr.LibInfo.LibName, addr.Offset, absAddr)
+		}
+		if needWait {
+			return this.startLinkerCtorWait(addresss)
+		}
+	}
+
 	for _, addr := range addresss {
-		err := this.CreateBreakPoint(addr, true)
+		var err error
+		if config.Preference == config.ALL_PERF {
+			err = this.CreateHWBreakPoint(addr, true, config.HW_BREAKPOINT_X)
+		} else {
+			err = this.CreateBreakPoint(addr, true)
+		}
 		if err != nil {
 			fmt.Printf("Create Breakpoints Failed: %v, skipped.\n", err)
 			continue
@@ -202,7 +231,84 @@ func (this *BreakPointManager) Start(addresss []*controller.Address) error {
 	return this.SetupProbe()
 }
 
+func (this *BreakPointManager) startLinkerCtorWait(addresses []*controller.Address) error {
+	config.Debugf("startLinkerCtorWait: %d pending addresses, TargetLibName=%q", len(addresses), this.TargetLibName)
+	this.pendingHWBreaks = addresses
+	this.waitingForLoad = true
+	config.WaitCtor = true
+
+	linkerInfo, err := controller.ResolveLinkerInfo(this.process)
+	if err != nil {
+		return fmt.Errorf("linker-wait: %v", err)
+	}
+	config.Debugf("startLinkerCtorWait: linkerPath=%s ctorOffset=0x%x sonameOffset=%d",
+		linkerInfo.Path, linkerInfo.CtorSymbolOffset, linkerInfo.SonameFieldOffset)
+
+	targetUID := config.TargetUID
+	if targetUID == 0 && this.process != nil && this.process.PackageName != "" {
+		packageInfos := utils.GetPackageInfos()
+		pkgInfo, err := packageInfos.FindPackageByName(this.process.PackageName)
+		if err == nil {
+			targetUID = pkgInfo.Uid
+		}
+		config.Debugf("startLinkerCtorWait: resolved UID from package: %d (err=%v)", targetUID, err)
+	}
+	config.Debugf("startLinkerCtorWait: targetUID=%d filterLib=%q", targetUID, this.TargetLibName)
+
+	return this.ProbeHandler.SetupLinkerProbe(
+		linkerInfo.Path,
+		linkerInfo.CtorSymbolOffset,
+		this.TargetLibName,
+		linkerInfo.SonameFieldOffset,
+		targetUID,
+	)
+}
+
+func (this *BreakPointManager) OnLinkerCtorHit() error {
+	config.Debugf("OnLinkerCtorHit: entered, waitingForLoad=%v", this.waitingForLoad)
+	if !this.waitingForLoad {
+		return nil
+	}
+	this.waitingForLoad = false
+	config.WaitCtor = false
+
+	if err := this.ProbeHandler.StopLinkerProbe(); err != nil {
+		fmt.Printf("Warning: failed to stop linker probe: %v\n", err)
+	}
+	config.Debugf("OnLinkerCtorHit: linker probe stopped, updating pid list & maps")
+
+	this.process.UpdatePidList()
+	config.Debugf("OnLinkerCtorHit: PidList=%v WorkPid=%d", this.process.PidList, this.process.WorkPid)
+	this.process.UpdateMaps()
+
+	for _, addr := range this.pendingHWBreaks {
+		config.Debugf("OnLinkerCtorHit: resolving %s+0x%x", addr.LibInfo.LibName, addr.Offset)
+		absAddr, err := this.process.GetAbsoluteAddress(addr)
+		if err != nil {
+			fmt.Printf("Failed to resolve address %s+0x%x: %v\n", addr.LibInfo.LibName, addr.Offset, err)
+			continue
+		}
+		config.Debugf("OnLinkerCtorHit: resolved to 0x%x", absAddr)
+		addr.Absolute = absAddr
+		err = this.CreateHWBreakPoint(addr, true, config.HW_BREAKPOINT_X)
+		if err != nil {
+			fmt.Printf("Failed to create HW breakpoint at 0x%x: %v\n", absAddr, err)
+			continue
+		}
+		fmt.Printf("HW breakpoint set at 0x%x (%s+0x%x)\n", absAddr, addr.LibInfo.LibName, addr.Offset)
+	}
+
+	this.pendingHWBreaks = nil
+	config.Debugf("OnLinkerCtorHit: calling SetupProbe")
+	return this.SetupProbe()
+}
+
+func (this *BreakPointManager) IsWaitingForLoad() bool {
+	return this.waitingForLoad
+}
+
 func (this *BreakPointManager) Stop() error {
+	this.ProbeHandler.StopLinkerProbe()
 	err := this.ProbeHandler.Stop()
 	if err == nil {
 		this.Running = false

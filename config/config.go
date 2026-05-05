@@ -28,7 +28,11 @@ var NC = "\033[0m"
 var DisablePackageCheck = false
 var SHOW_VERTUAL = false
 var TargetUID uint32 = 0
+var WaitCtor = false
 var Verbose = false
+
+const LinkerCtorSentinelPC uint64 = 0xFFFFFFFE
+const DefaultSonameOffset uint64 = 416
 
 func Debugf(format string, args ...interface{}) {
 	if Verbose {
