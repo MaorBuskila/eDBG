@@ -30,6 +30,7 @@ type ThreadFilter struct {
 type UserConfig struct {
 	Registers     bool
 	Disasm        bool
+	HitOnly       bool
 	ThreadFilters []*ThreadFilter
 	Display       []*DisplayInfo
 }
@@ -47,6 +48,7 @@ type Client struct {
 	PreviousCMD    string
 	Working        bool
 	promptInstance *prompt.Prompt
+	HitCount       uint64
 }
 
 func CreateClient(process *controller.Process, library *controller.LibraryInfo, brkManager *module.BreakPointManager, config *UserConfig) *Client {
@@ -120,6 +122,12 @@ func (this *Client) OutputInfo() {
 		fmt.Println("─────────────────────────────────────────────────────────────────────────────────────────")
 		fmt.Print(config.NC)
 	}
+}
+
+func (this *Client) HitOnlyOutput() {
+	this.HitCount++
+	fmt.Printf("\n%s[Hit #%d]%s\n", config.YELLOW, this.HitCount, config.NC)
+	this.OutputInfo()
 }
 
 func (this *Client) PrintDisplay() {

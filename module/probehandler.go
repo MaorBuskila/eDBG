@@ -156,10 +156,28 @@ func (this *ProbeHandler) Run() error {
     if err = this.bpfManager.Start(); err != nil {
         return fmt.Errorf("ProbeHandler.Run(): couldn't start bootstrap manager %v .", err)
     }
+    if config.HitOnly {
+        if err = this.setHitOnlyConfig(); err != nil {
+            return fmt.Errorf("Failed to set hit-only config: %v", err)
+        }
+    }
     if err = this.SetHWBreakInternel(); err != nil {
         return fmt.Errorf("Failed to set up Hardware breakpoint: %v", err)
     }
     return nil
+}
+
+func (this *ProbeHandler) setHitOnlyConfig() error {
+    em, found, err := this.bpfManager.GetMap("config_map")
+    if !found {
+        return fmt.Errorf("config_map not found")
+    }
+    if err != nil {
+        return fmt.Errorf("get config_map failed: %v", err)
+    }
+    key := uint32(0)
+    val := uint32(1)
+    return em.Put(key, val)
 }
 
 func (this *ProbeHandler) Stop() error {

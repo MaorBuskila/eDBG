@@ -82,6 +82,32 @@ func (this *EventListener) Workdata(data []byte) {
 	this.client.Incoming <- true
 }
 
+func (this *EventListener) hitOnlyDispatch(data []byte) {
+	this.process.Context = this.parseContext(data)
+	this.client.HitOnlyOutput()
+	this.client.Working = false
+	this.client.NotifyContinue <- true
+}
+
+func (this *EventListener) dispatchEvent(data []byte, PC uint64) {
+	if config.HitOnly {
+		if PC == 0xFFFFFFFF {
+			dataRaw := <-this.Record
+			this.hitOnlyDispatch(dataRaw.RawSample[12:])
+		} else {
+			this.hitOnlyDispatch(data)
+		}
+		return
+	}
+	if PC == 0xFFFFFFFF {
+		dataRaw := <-this.Record
+		this.Incomingdata <- dataRaw.RawSample[12:]
+	} else {
+		this.Incomingdata <- data
+	}
+	this.client.DoClean <- true
+}
+
 func (this *EventListener) Run() {
 	go func() {
 		for {
@@ -181,15 +207,15 @@ func (this *EventListener) WorkEvent(data []byte) {
 	for _, ablepid := range process.PidList {
 		if this.pid == ablepid {
 			process.WorkPid = this.pid
-			process.StoppedPID(this.pid)
+			if !config.HitOnly {
+				process.StoppedPID(this.pid)
+			}
 			if this.client.BrkManager.TempBreakTid != 0 {
 				// 临时断点判断线程 ID
 				if PC == 0xFFFFFFFF {
 					if nowTid == this.client.BrkManager.TempBreakTid {
 						process.WorkTid = nowTid
-						dataRaw := <-this.Record
-						this.Incomingdata <- dataRaw.RawSample[12:]
-						this.client.DoClean <- true
+						this.dispatchEvent(data, PC)
 						return
 					}
 					this.PassEvent(PC == 0xFFFFFFFF)
@@ -206,13 +232,7 @@ func (this *EventListener) WorkEvent(data []byte) {
 					valid = true
 					if nowTid == t.Thread.Tid {
 						process.WorkTid = nowTid
-						if PC == 0xFFFFFFFF {
-							dataRaw := <-this.Record
-							this.Incomingdata <- dataRaw.RawSample[12:]
-						} else {
-							this.Incomingdata <- data
-						}
-						this.client.DoClean <- true
+						this.dispatchEvent(data, PC)
 						return
 					}
 					continue
@@ -226,19 +246,14 @@ func (this *EventListener) WorkEvent(data []byte) {
 					found := false
 					for _, tInfo := range tList {
 						if strings.Contains(t.Thread.Name, tInfo.Name) {
-							// 线程名称有长度限制会被截断，尽量支持用户指定完整的线程名称
 							valid = true
 							found = true
 							if tInfo.Tid == nowTid {
 								process.WorkTid = nowTid
-								process.StoppedPID(this.pid)
-								if PC == 0xFFFFFFFF {
-									dataRaw := <-this.Record
-									this.Incomingdata <- dataRaw.RawSample[12:]
-								} else {
-									this.Incomingdata <- data
+								if !config.HitOnly {
+									process.StoppedPID(this.pid)
 								}
-								this.client.DoClean <- true
+								this.dispatchEvent(data, PC)
 								return
 							}
 						}
@@ -252,24 +267,18 @@ func (this *EventListener) WorkEvent(data []byte) {
 			if !valid {
 				// 没有可用的线程过滤器，按照 pid 工作
 				process.WorkTid = nowTid
-				process.StoppedPID(this.pid)
-				if PC == 0xFFFFFFFF {
-					dataRaw := <-this.Record
-					this.Incomingdata <- dataRaw.RawSample[12:]
-				} else {
-					this.Incomingdata <- data
+				if !config.HitOnly {
+					process.StoppedPID(this.pid)
 				}
-				this.client.DoClean <- true
+				this.dispatchEvent(data, PC)
 				return
 			}
-			// fmt.Println("PASSED: PID ABLE BUT FILTERED BY THREAD")
 			this.PassEvent(PC == 0xFFFFFFFF)
-			// 目标 PID，在确认 Event 清空后 Continue
 			return
 		}
 	}
-	// 无关 PID 直接 Continue
-	// fmt.Println("PASSED: Unrelated PID")
 	this.PassEvent(PC == 0xFFFFFFFF)
-	syscall.Kill(int(this.pid), syscall.SIGCONT)
+	if !config.HitOnly {
+		syscall.Kill(int(this.pid), syscall.SIGCONT)
+	}
 }

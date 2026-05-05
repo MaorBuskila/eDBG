@@ -23,6 +23,12 @@ struct {
     __type(value, __u32);                                                                
 } events SEC(".maps");
 
+struct {
+    __uint(type, BPF_MAP_TYPE_ARRAY);
+    __uint(max_entries, 1);
+    __type(key, u32);
+    __type(value, u32);
+} config_map SEC(".maps");
 
 static __always_inline u32 do_probe(struct pt_regs* ctx, u32 point_key) {
     __u32 zero = 0;
@@ -39,7 +45,11 @@ static __always_inline u32 do_probe(struct pt_regs* ctx, u32 point_key) {
     bpf_probe_read_kernel(&data->pc, sizeof(data->pc), &ctx->pc);
     bpf_probe_read_kernel(&data->pstate, sizeof(data->pstate), &ctx->pstate);
     bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, data, sizeof(struct data_t));
-    bpf_send_signal(19);
+    __u32 cfg_key = 0;
+    u32 *hit_only = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (!hit_only || *hit_only == 0) {
+        bpf_send_signal(19);
+    }
     return 0;   
 }
 
@@ -94,7 +104,11 @@ int probe_perf(struct pt_regs *ctx ) {
     }
     data->pc = 0xffffffff;
     bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, data, sizeof(struct data_t));
-    bpf_send_signal(19);
+    __u32 cfg_key = 0;
+    u32 *hit_only = bpf_map_lookup_elem(&config_map, &cfg_key);
+    if (!hit_only || *hit_only == 0) {
+        bpf_send_signal(19);
+    }
     return 0;
 }
 

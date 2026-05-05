@@ -111,6 +111,8 @@ func main() {
 		vbkFlag         string
 		mcpMode         bool
 		mcpPort         int
+		hitOnly         bool
+		hitOnlyShort    bool
 		uid             uint
 		// vertual			bool
 	)
@@ -137,10 +139,13 @@ func main() {
 	flag.StringVar(&outputfile, "o", "&&NotSetNotSetNotSetO=O", "Save your progress to specified file")
 	flag.BoolVar(&mcpMode, "mcp", false, "Start eDBG in MCP server mode")
 	flag.IntVar(&mcpPort, "mcp-port", 19810, "Port used by the MCP server")
+	flag.BoolVar(&hitOnly, "hit-only", false, "Trace breakpoint hits without stopping the target process")
+	flag.BoolVar(&hitOnlyShort, "ho", false, "Trace breakpoint hits without stopping the target process (shorthand)")
 	flag.UintVar(&uid, "u", 0, "Target app UID for process filtering")
 	flag.BoolVar(&config.Verbose, "v", false, "Verbose debug output")
 	flag.Parse()
 	config.TargetUID = uint32(uid)
+	config.HitOnly = hitOnly || hitOnlyShort
 	config.DisablePackageCheck = disablePkgChk
 
 	if mcpMode {
@@ -242,6 +247,7 @@ func main() {
 	client := cli.CreateClient(process, library, brkManager, &cli.UserConfig{
 		Registers: !hidreg,
 		Disasm:    !hiddis,
+		HitOnly:   config.HitOnly,
 	})
 	if mcpMode {
 		client.EnableMCPMode()
