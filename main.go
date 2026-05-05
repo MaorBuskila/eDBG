@@ -111,6 +111,7 @@ func main() {
 		vbkFlag         string
 		mcpMode         bool
 		mcpPort         int
+		uid             uint
 		// vertual			bool
 	)
 	var brkFlag string
@@ -136,8 +137,10 @@ func main() {
 	flag.StringVar(&outputfile, "o", "&&NotSetNotSetNotSetO=O", "Save your progress to specified file")
 	flag.BoolVar(&mcpMode, "mcp", false, "Start eDBG in MCP server mode")
 	flag.IntVar(&mcpPort, "mcp-port", 19810, "Port used by the MCP server")
+	flag.UintVar(&uid, "u", 0, "Target app UID for process filtering")
 	flag.BoolVar(&config.Verbose, "v", false, "Verbose debug output")
 	flag.Parse()
+	config.TargetUID = uint32(uid)
 	config.DisablePackageCheck = disablePkgChk
 
 	if mcpMode {

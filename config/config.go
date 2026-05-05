@@ -27,6 +27,7 @@ var NC = "\033[0m"
 
 var DisablePackageCheck = false
 var SHOW_VERTUAL = false
+var TargetUID uint32 = 0
 var Verbose = false
 
 func Debugf(format string, args ...interface{}) {

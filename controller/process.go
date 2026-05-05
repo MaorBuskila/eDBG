@@ -61,20 +61,36 @@ func (this *Process) GetExecPath() error {
 
 func (this *Process) UpdatePidList() {
 	this.PidList = []uint32{}
-    content, err := utils.RunCommand("sh", "-c", "ps -ef -o name,pid,ppid | grep ^"+this.PackageName)
-    if err != nil {
-        return
-    }
-    lines := strings.Split(content, "\n")
-    for _, line := range lines {
-        parts := strings.Fields(line)
-        value, err := strconv.ParseUint(parts[1], 10, 32)
-        if err != nil {
-            panic(err)
-        }
-        this.PidList = append(this.PidList, uint32(value))
-    }
-    return
+	selfPid := uint32(os.Getpid())
+	var content string
+	var err error
+	if config.TargetUID != 0 {
+		cmd := fmt.Sprintf("ps -A -o uid,pid,name | awk '$1==%d {print $3,$2}'", config.TargetUID)
+		config.Debugf("UpdatePidList: running: %s", cmd)
+		content, err = utils.RunCommand("sh", "-c", cmd)
+	} else {
+		content, err = utils.RunCommand("sh", "-c", "ps -ef -o name,pid,ppid | grep ^"+this.PackageName)
+	}
+	config.Debugf("UpdatePidList: content=%q err=%v", content, err)
+	if err != nil {
+		return
+	}
+	lines := strings.Split(content, "\n")
+	for _, line := range lines {
+		parts := strings.Fields(line)
+		if len(parts) < 2 {
+			continue
+		}
+		value, err := strconv.ParseUint(parts[1], 10, 32)
+		if err != nil {
+			continue
+		}
+		pid := uint32(value)
+		if pid == selfPid {
+			continue
+		}
+		this.PidList = append(this.PidList, pid)
+	}
 }
 
 
