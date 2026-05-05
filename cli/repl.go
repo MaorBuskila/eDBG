@@ -217,7 +217,53 @@ func (this *Client) StopProbes() {
 	}
 }
 
+func (this *Client) PrintConfig() {
+	selfPid := os.Getpid()
+	threadWhitelist := 0
+	if len(this.Config.ThreadFilters) > 0 {
+		threadWhitelist = 1
+	}
+	fmt.Printf("ConfigMap{edbg_pid=%d,thread_whitelist=%d}\n", selfPid, threadWhitelist)
+
+	uidList := []string{}
+	uid := config.TargetUID
+	if uid == 0 && this.Process != nil && this.Process.PackageName != "" {
+		pkgInfos := utils.GetPackageInfos()
+		pkgInfo, err := pkgInfos.FindPackageByName(this.Process.PackageName)
+		if err == nil {
+			uid = pkgInfo.Uid
+		}
+	}
+	if uid != 0 {
+		uidList = append(uidList, fmt.Sprintf("%d", uid))
+	}
+	fmt.Printf("uid => whitelist:[%s];blacklist:[]\n", strings.Join(uidList, ","))
+
+	pidList := []string{}
+	if this.Process != nil {
+		this.Process.UpdatePidList()
+		for _, pid := range this.Process.PidList {
+			pidList = append(pidList, fmt.Sprintf("%d", pid))
+		}
+	}
+	fmt.Printf("pid => whitelist:[%s];blacklist:[]\n", strings.Join(pidList, ","))
+
+	tidList := []string{}
+	for _, t := range this.Config.ThreadFilters {
+		if !t.Enable {
+			continue
+		}
+		if t.Thread.Tid != 0 {
+			tidList = append(tidList, fmt.Sprintf("%d", t.Thread.Tid))
+		} else if t.Thread.Name != "" {
+			tidList = append(tidList, t.Thread.Name)
+		}
+	}
+	fmt.Printf("tid => whitelist:[%s];blacklist:[]\n", strings.Join(tidList, ","))
+}
+
 func (this *Client) REPL() {
+	this.PrintConfig()
 	this.promptInstance = prompt.New(
 		this.executeCommand,
 		this.completer,
