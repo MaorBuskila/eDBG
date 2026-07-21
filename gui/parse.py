@@ -518,6 +518,17 @@ _TLS_SLOT_RE = re.compile(
 )
 
 
+def is_tls_line(line: str) -> bool:
+    """True for any line that could belong to a ``tls`` dump.
+
+    Lets a caller re-parse a rolling window only when TLS output actually
+    arrived, instead of on every frame.
+    """
+    s = strip_ansi(line).strip()
+    return bool(_TLS_HDR_RE.match(s) or _TLS_BASE_RE.match(s)
+                or _TLS_SLOT_RE.match(s))
+
+
 def parse_tls(lines: list[str]) -> TlsDump | None:
     """Parse a ``tls`` command response.
 

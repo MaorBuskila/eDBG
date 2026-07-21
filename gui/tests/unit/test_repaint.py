@@ -27,6 +27,9 @@ def built_ctx():
     app._last_rendered_hit = None
     app._accumulated_reg_mem = []
     app._log_item_ids.clear()
+    # The output window outlives a session; a dump left in it would be
+    # reassembled into the next test's parse.
+    app._recent_output.clear()
     app._dirty.clear()
     app._set_mode(modes.DEFAULT_MODE)
     yield
@@ -238,6 +241,40 @@ def test_selecting_a_thread_requests_its_tls(built_ctx, monkeypatch):
     monkeypatch.setattr(app._session, "send_command", sent.append)
     app._cb_select_thread(None, None, 12350)
     assert sent == ["thread 12350", "tls"]
+
+
+def test_a_stop_asks_for_tls(built_ctx, monkeypatch):
+    """Without this the TLS pane is empty on every hit until a thread is
+    clicked, which is indistinguishable from a thread that has no TLS."""
+    sent = []
+    monkeypatch.setattr(app._session, "send_command", sent.append)
+    app._auto_fetch_on_hit()
+    assert "tls" in sent
+
+
+def test_a_dump_split_across_frames_still_lands(built_ctx, monkeypatch):
+    """The pty hands over whatever bytes arrived. A dump whose header and slots
+    land in different polls is the common case, not an edge case."""
+    _drive(monkeypatch, [TLS_OUTPUT[:2], TLS_OUTPUT[2:]])
+    assert app._session.last_tls is not None
+    assert len(app._session.last_tls.slots) == 2
+
+
+def test_a_dump_split_slot_by_slot_still_lands(built_ctx, monkeypatch):
+    _drive(monkeypatch, [[line] for line in TLS_OUTPUT])
+    assert len(app._session.last_tls.slots) == 2
+
+
+def test_later_output_does_not_erase_the_dump(built_ctx, monkeypatch):
+    _drive(monkeypatch, [TLS_OUTPUT, ["Not stopped on a thread.", "(eDBG) "]])
+    assert app._session.last_tls is not None
+    assert len(app._session.last_tls.slots) == 2
+
+
+def test_the_newest_dump_wins(built_ctx, monkeypatch):
+    second = [l.replace("12350", "12351") for l in TLS_OUTPUT]
+    _drive(monkeypatch, [TLS_OUTPUT, second])
+    assert app._session.last_tls.tid == 12351
 
 
 def test_tls_is_copyable(built_ctx):

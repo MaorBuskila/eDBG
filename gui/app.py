@@ -133,6 +133,11 @@ _log_line_count: int = 0
 _LOG_MAX_LINES = 500
 _log_item_ids: deque = deque()
 
+# Rolling window of recent ANSI-stripped output, for responses that span more
+# polls than one. A full TLS dump is utils.TlsDumpLen/8 + 2 = 258 lines, so the
+# window has to hold comfortably more than that for a split dump to reassemble.
+_recent_output: deque = deque(maxlen=512)
+
 # ── Accumulated register memory (per hit) ───────────────────────────
 _accumulated_reg_mem: list[tuple[int, bytes]] = []
 
@@ -727,6 +732,7 @@ def _auto_fetch_on_hit() -> None:
     """Send bt, info thread, and memory examine for pointer registers."""
     _session.send_command("bt")
     _session.send_command("info thread")
+    _session.send_command("tls")
 
     count = 0
     for r in _session.last_regs:
@@ -1037,10 +1043,17 @@ def _frame_update():
             _session.last_backtrace.extend(bt)
             _dirty.mark("pane_backtrace")
 
-    tls = parse.parse_tls([parse.strip_ansi(l) for l in new_lines])
-    if tls is not None:
-        _session.last_tls = tls
-        _dirty.mark("pane_tls")
+    # A dump is many lines and the pty hands over whatever bytes arrived, so a
+    # header and its slots routinely land in different polls. Parsing a rolling
+    # window instead of one batch is what makes a split dump survive; re-parsing
+    # only when TLS-shaped output arrived is what keeps it off the hot path.
+    clean_lines = [parse.strip_ansi(l) for l in new_lines]
+    _recent_output.extend(clean_lines)
+    if any(parse.is_tls_line(l) for l in clean_lines):
+        tls = parse.parse_tls(list(_recent_output))
+        if tls is not None and tls.slots:
+            _session.last_tls = tls
+            _dirty.mark("pane_tls")
 
     _refresh_panes()
 
