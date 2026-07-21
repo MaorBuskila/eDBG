@@ -194,6 +194,101 @@ def test_flow_to_text_handles_none():
     assert flowtrace.flow_to_text(None) == "(no flow trace)"
 
 
+# ── run metadata (the leading "#" row) ───────────────────────────────
+
+META = '"# lib=libloader,rva=0x1c6f68,symbol=Java_com_foo_bar"\n'
+
+
+def test_metadata_row_carries_the_entry_symbol(tmp_path):
+    run = flowtrace.parse_flow_csv(
+        _write(tmp_path, "libloader_0x1c6f68_flow.csv", META + BARE))
+    assert run.symbol == "Java_com_foo_bar"
+    assert run.steps == 3          # the metadata row is not a step
+
+
+def test_a_symbol_holding_commas_and_equals_survives(tmp_path):
+    text = '"# lib=l,rva=0x10,symbol=f(int, char*)=x"\n' + BARE
+    run = flowtrace.parse_flow_csv(_write(tmp_path, "l_0x10_flow.csv", text))
+    assert run.symbol == "f(int, char*)=x"
+
+
+def test_a_csv_without_metadata_has_no_symbol(tmp_path):
+    # Every CSV pulled before this change. It must parse exactly as before.
+    run = flowtrace.parse_flow_csv(_write(tmp_path, "l_0x10_flow.csv", BARE))
+    assert run.symbol == ""
+    assert run.steps == 3
+
+
+def test_an_unresolved_symbol_is_empty_not_missing(tmp_path):
+    run = flowtrace.parse_flow_csv(
+        _write(tmp_path, "l_0x10_flow.csv", '"# lib=l,rva=0x10,symbol="\n' + BARE))
+    assert run.symbol == ""
+
+
+# ── the --mem probe, per step ────────────────────────────────────────
+
+def test_mem_at_returns_the_probed_pair(tmp_path):
+    run = flowtrace.parse_flow_csv(
+        _write(tmp_path, "l_0x10_flow.csv", WITH_MEM))
+    assert run.mem_at(0) == (0x7B4070D728, 0x4142434445464748)
+    assert run.mem_at(1) == (0x7B4070D728, None)      # Go wrote ERR
+
+
+def test_mem_at_on_a_run_without_the_flag_is_none(tmp_path):
+    run = flowtrace.parse_flow_csv(_write(tmp_path, "l_0x10_flow.csv", BARE))
+    assert run.mem_at(0) is None
+    assert run.mem_at(99) is None
+
+
+# ── the --tls sidecar ────────────────────────────────────────────────
+
+TLS_SIDECAR = """\
+step,slot,addr,value,class,annot
+0,0,0x7b4070d750,0x7b4070d800,stack,
+0,1,0x7b4070d758,0x7ab60e0078,code,libloader.so+0x1fb078
+1,0,0x7b4070d750,0x0,junk,........
+"""
+
+
+def test_tls_sidecar_is_picked_up_next_to_the_run(tmp_path):
+    _write(tmp_path, "libloader_0x1c6f68_flow_tls.csv", TLS_SIDECAR)
+    run = flowtrace.parse_flow_csv(
+        _write(tmp_path, "libloader_0x1c6f68_flow.csv", BARE))
+    assert run.has_tls
+    slots = run.tls_at(0)
+    assert [s.slot for s in slots] == [0, 1]
+    assert slots[1].value == 0x7AB60E0078
+    assert slots[1].cls == "code"
+    assert slots[1].annot == "libloader.so+0x1fb078"
+    assert slots[0].annot == ""
+
+
+def test_a_step_the_sidecar_never_reached_has_no_slots(tmp_path):
+    _write(tmp_path, "l_0x10_flow_tls.csv", TLS_SIDECAR)
+    run = flowtrace.parse_flow_csv(_write(tmp_path, "l_0x10_flow.csv", BARE))
+    assert run.tls_at(2) == []
+
+
+def test_a_run_without_the_sidecar_says_so(tmp_path):
+    run = flowtrace.parse_flow_csv(_write(tmp_path, "l_0x10_flow.csv", BARE))
+    assert not run.has_tls
+    assert run.tls_at(0) == []
+
+
+def test_a_garbage_sidecar_row_drops_only_itself(tmp_path):
+    text = TLS_SIDECAR + "2,0,notahex,0x1,stack,\n2,1,0x7b4070d758,0x2,heap,\n"
+    _write(tmp_path, "l_0x10_flow_tls.csv", text)
+    run = flowtrace.parse_flow_csv(_write(tmp_path, "l_0x10_flow.csv", BARE))
+    assert [s.slot for s in run.tls_at(2)] == [1]
+
+
+def test_the_sidecar_is_never_a_run_of_its_own(tmp_path):
+    _write(tmp_path, "l_0x10_flow.csv", BARE)
+    _write(tmp_path, "l_0x10_flow_tls.csv", TLS_SIDECAR)
+    runs = flowtrace.discover_runs(str(tmp_path))
+    assert len(runs) == 1 and runs[0].has_tls
+
+
 # ── the real artifact, when it is on disk ────────────────────────────
 
 _SAMPLE = os.path.join(os.path.dirname(__file__), "..", "..", "data",
