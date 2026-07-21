@@ -50,6 +50,7 @@ GUI_COMMANDS = [
     "display 0x7b80e12340 64 myvar",      # was `<addr> <name> <len>` — swapped
     "thread 12345",
     "flow 0x1234 --over --max 500 --regs --mem X0 --quiet",  # was single-dash
+    "tls",                                # HandleTls: no args = dump from SP
 ]
 
 # Rejections eDBG prints when it does not understand a command.

@@ -82,8 +82,8 @@ def threads_to_text(threads: list[dict]) -> str:
 
 
 def tls_to_text(dump: parse.TlsDump | None) -> str:
-    if dump is None:
-        return ""
+    if dump is None or not dump.slots:
+        return "(no tls)"
     out = [f"tls tid={dump.tid} map={dump.map_name} "
            f"0x{dump.map_start:x}-0x{dump.map_end:x}",
            f"base=0x{dump.base:x}  len=0x{dump.length:x}"]

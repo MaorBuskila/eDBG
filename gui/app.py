@@ -353,6 +353,17 @@ def _populate_breakpoints() -> None:
                 dpg.add_text(f"{bp['library']}+0x{bp['offset']:x}", color=theme.ACCENT_CYAN)
 
 
+@_safe
+def _cb_select_thread(sender, app_data, user_data):
+    """Switch thread, then re-dump TLS.
+
+    TLS is per-thread, so leaving the previous thread's dump on screen under a
+    new tid is worse than showing nothing.
+    """
+    _session.send_command(f"thread {user_data}")
+    _session.send_command("tls")
+
+
 def _populate_threads() -> None:
     """Fill the threads pane with colored text."""
     if not _should_paint("pane_threads"):
@@ -368,8 +379,8 @@ def _populate_threads() -> None:
             marker = ">>" if is_cur else "  "
             dpg.add_text(marker, color=theme.ACCENT_GREEN if is_cur else theme.TEXT_DIM)
             dpg.add_text(f"[{t['index']}]", color=theme.ACCENT_AMBER)
-            dpg.add_text(f" {t['tid']}:", color=theme.ACCENT_CYAN)
-            dpg.add_text(f" {t['name']}", color=theme.TEXT)
+            dpg.add_selectable(label=f" {t['tid']}: {t['name']}",
+                               user_data=t["tid"], callback=_cb_select_thread)
 
 
 # What each TLS slot class means at a glance: a code pointer is not the same
@@ -428,6 +439,8 @@ _COPY_SOURCES = {
     "pane_threads":     ("Threads",
                          lambda: textdump.threads_to_text(
                              _session.last_threads)),
+    "pane_tls":         ("TLS",
+                         lambda: textdump.tls_to_text(_session.last_tls)),
     "pane_log":         ("Log",
                          lambda: textdump.log_to_text(_session.transcript)),
 }

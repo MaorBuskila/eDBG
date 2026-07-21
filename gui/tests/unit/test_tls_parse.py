@@ -112,4 +112,5 @@ def test_tls_to_text_round_trips_every_slot():
 
 
 def test_tls_to_text_handles_none():
-    assert textdump.tls_to_text(None) == ""
+    # Every copy getter yields placeholder text on an empty session.
+    assert textdump.tls_to_text(None) == "(no tls)"

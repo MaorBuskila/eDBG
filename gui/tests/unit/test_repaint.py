@@ -211,3 +211,37 @@ def test_tls_arriving_while_hidden_renders_on_reveal(built_ctx, monkeypatch):
     assert app._session.last_tls is not None
     # header + one row per slot
     assert _rows("pane_tls") == 1 + len(app._session.last_tls.slots)
+
+
+# ── TLS pane ─────────────────────────────────────────────────────────
+
+def test_tls_renders_one_row_per_slot_plus_header(built_ctx, monkeypatch):
+    app._set_mode("step")
+    _drive(monkeypatch, [TLS_OUTPUT])
+    assert _rows("pane_tls") == 1 + 2
+
+
+def test_tls_is_absent_from_trace_and_log_modes():
+    for mode in ("trace", "log"):
+        assert "pane_tls" not in modes.visible_panes(mode)
+
+
+def test_tls_is_present_in_step_and_inspect():
+    for mode in ("step", "inspect"):
+        assert "pane_tls" in modes.visible_panes(mode)
+
+
+def test_selecting_a_thread_requests_its_tls(built_ctx, monkeypatch):
+    """Switching thread must re-dump TLS — TLS is per-thread, so a stale dump
+    from another tid is worse than none."""
+    sent = []
+    monkeypatch.setattr(app._session, "send_command", sent.append)
+    app._cb_select_thread(None, None, 12350)
+    assert sent == ["thread 12350", "tls"]
+
+
+def test_tls_is_copyable(built_ctx):
+    assert "pane_tls" in app._COPY_SOURCES
+    label, getter = app._COPY_SOURCES["pane_tls"]
+    assert label == "TLS"
+    assert getter() == "(no tls)"   # nothing captured yet
