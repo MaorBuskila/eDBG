@@ -46,6 +46,8 @@ TAG = {
     "pane_log":           "pane_log",
     "pane_breakpoints":   "pane_breakpoints",
     "pane_flow":          "pane_flow",
+    "pane_flow_history":  "pane_flow_history",
+    "pane_flow_regs":     "pane_flow_regs",
     "pane_tls":           "pane_tls",
     "pane_watch":         "pane_watch",
     # shell
@@ -520,6 +522,16 @@ def _populate_flow() -> None:
         return
 
 
+def _populate_flow_history() -> None:
+    if not _should_paint("pane_flow_history"):
+        return
+
+
+def _populate_flow_regs() -> None:
+    if not _should_paint("pane_flow_regs"):
+        return
+
+
 def _populate_watch() -> None:
     if not _should_paint("pane_watch"):
         return
@@ -539,6 +551,8 @@ _PANE_PAINTERS = {
     "pane_memory":      _populate_memory,
     "pane_backtrace":   _populate_backtrace,
     "pane_flow":        _populate_flow,
+    "pane_flow_history": _populate_flow_history,
+    "pane_flow_regs":   _populate_flow_regs,
     "pane_threads":     _populate_threads,
     "pane_tls":         _populate_tls,
     "pane_watch":       _populate_watch,
@@ -1100,6 +1114,16 @@ def _build_pane_flow() -> None:
     _pane_body("pane_flow", "(no flow trace)")
 
 
+def _build_pane_flow_history() -> None:
+    _hdr("FLOW HISTORY")
+    _pane_body("pane_flow_history", "(no flow runs)")
+
+
+def _build_pane_flow_regs() -> None:
+    _hdr("STEP REGISTERS")
+    _pane_body("pane_flow_regs", "(no step selected)")
+
+
 def _build_pane_threads() -> None:
     _hdr("THREADS")
     _pane_body("pane_threads", "(no threads)")
@@ -1136,6 +1160,8 @@ _PANE_BUILDERS = {
     "pane_memory":      _build_pane_memory,
     "pane_backtrace":   _build_pane_backtrace,
     "pane_flow":        _build_pane_flow,
+    "pane_flow_history": _build_pane_flow_history,
+    "pane_flow_regs":   _build_pane_flow_regs,
     "pane_threads":     _build_pane_threads,
     "pane_tls":         _build_pane_tls,
     "pane_watch":       _build_pane_watch,
@@ -1170,6 +1196,8 @@ _PANE_CHROME = {
     "pane_memory":      _HEADER_H + 2 * _CONTROL_ROW_H,
     "pane_backtrace":   _HEADER_H,
     "pane_flow":        _HEADER_H + 2 * _CONTROL_ROW_H,
+    "pane_flow_history": _HEADER_H,
+    "pane_flow_regs":   _HEADER_H,
     "pane_threads":     _HEADER_H,
     "pane_tls":         _HEADER_H,
     "pane_watch":       _HEADER_H + _CONTROL_ROW_H,

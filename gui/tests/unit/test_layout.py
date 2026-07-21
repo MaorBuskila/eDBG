@@ -24,11 +24,13 @@ def built_ctx():
 
 
 def _ancestors(tag) -> list:
+    """Ancestor aliases. ``get_item_parent`` answers in numeric ids, so a
+    caller comparing against a tag string needs the alias back."""
     out, node = [], tag
     while node:
         node = dpg.get_item_parent(node)
         if node:
-            out.append(node)
+            out.append(dpg.get_item_alias(node) or node)
     return out
 
 

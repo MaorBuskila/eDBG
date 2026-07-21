@@ -17,9 +17,11 @@ COLUMNS = ("left", "center", "right")
 PANES = (
     "pane_regs",
     "pane_breakpoints",
+    "pane_flow_history",
     "pane_disasm",
     "pane_memory",
     "pane_backtrace",
+    "pane_flow_regs",
     "pane_flow",
     "pane_threads",
     "pane_tls",
@@ -35,9 +37,12 @@ PANES = (
 MIN_COL_FRAC = {
     "pane_regs":        0.278,
     "pane_breakpoints": 0.220,
+    "pane_flow_history": 0.220,
     "pane_disasm":      0.314,
     "pane_memory":      0.355,
     "pane_backtrace":   0.220,
+    # No symbol or deref column, so it needs less than the live register pane.
+    "pane_flow_regs":   0.240,
     "pane_flow":        0.314,
     "pane_threads":     0.081,
     "pane_tls":         0.310,
@@ -72,11 +77,11 @@ MODES: dict[str, Mode] = {
     "trace": Mode(
         label="Trace",
         panes={
-            "left":   ("pane_regs",),
-            "center": ("pane_flow",),
-            "right":  ("pane_watch",),
+            "left":   ("pane_flow_history",),
+            "center": ("pane_flow_regs",),
+            "right":  ("pane_flow",),
         },
-        weights=(0.28, 0.40, 0.32),
+        weights=(0.24, 0.28, 0.48),
     ),
     "inspect": Mode(
         label="Inspect",
@@ -107,9 +112,11 @@ DEFAULT_MODE = "step"
 PANE_ROW_WEIGHT = {
     "pane_regs":        0.72,
     "pane_breakpoints": 0.28,
+    "pane_flow_history": 1.00,
     "pane_disasm":      0.45,
     "pane_memory":      0.35,
     "pane_backtrace":   0.20,
+    "pane_flow_regs":   1.00,
     "pane_flow":        1.00,
     "pane_threads":     0.25,
     "pane_tls":         0.55,

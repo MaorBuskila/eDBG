@@ -61,6 +61,36 @@ def test_every_visible_pane_fits_its_column(name):
                 f"{name}.{col} weight {weight} < {pane} floor {floor}")
 
 
+def test_every_pane_has_a_floor_and_a_row_weight():
+    # A pane missing from either table crashes the height arithmetic on the
+    # first mode switch that shows it.
+    for pane in modes.PANES:
+        assert pane in modes.MIN_COL_FRAC, f"{pane} has no MIN_COL_FRAC"
+        assert pane in modes.PANE_ROW_WEIGHT, f"{pane} has no PANE_ROW_WEIGHT"
+
+
+def test_trace_reads_history_then_registers_then_the_trace():
+    # Left to right is the order the operator works in: pick a run, read the
+    # registers for the step, follow the trace.
+    assert modes.MODES["trace"].panes["left"] == ("pane_flow_history",)
+    assert modes.MODES["trace"].panes["center"] == ("pane_flow_regs",)
+    assert modes.MODES["trace"].panes["right"] == ("pane_flow",)
+
+
+def test_watch_belongs_to_inspect_alone():
+    # A watch list has nothing to say about a finished trace.
+    assert "pane_watch" in modes.visible_panes("inspect")
+    for name in modes.MODES:
+        if name != "inspect":
+            assert "pane_watch" not in modes.visible_panes(name)
+
+
+def test_live_registers_are_not_in_trace_mode():
+    # Trace mode's centre column is per-step registers from the CSV; the live
+    # register pane keeps its own column and stays out.
+    assert "pane_regs" not in modes.visible_panes("trace")
+
+
 def test_memory_is_visible_while_stepping():
     # The blind spot this spec exists to remove: stepping in one mode while a
     # watched buffer mutates in another.
