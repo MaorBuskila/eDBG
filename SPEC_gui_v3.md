@@ -39,7 +39,7 @@ both and preserves the existing headless layout tests.
 | Key | Mode | LEFT | CENTER | RIGHT |
 |---|---|---|---|---|
 | F1 | **Step** | 0.28 Registers ┄ Breakpoints | 0.40 Disasm ┄ Memory ┄ Backtrace | 0.32 Threads ┄ TLS |
-| F2 | **Trace** | 0.28 Registers | 0.40 Flow trace | 0.32 Watch |
+| F2 | **Trace** | 0.24 Flow history | 0.28 Step registers | 0.48 Flow trace |
 | F3 | **Inspect** | 0.26 Registers | 0.42 Memory | 0.32 Threads ┄ TLS ┄ Watch |
 | F4 | **Log** | — | 1.00 Log / transcript | — |
 
@@ -170,12 +170,35 @@ dependency for correctness under load, not for this layout, and lands separately
 - **Per-mode column ratios saved across launches** — ratios are constants until
   a session proves otherwise.
 
+### Trace mode reads left to right
+
+A flow run is finished data on disk, not live process state, so Trace mode is
+driven by a selection — which run, which step — rather than by a stop:
+
+1. **Flow history** — every run this session, plus every CSV already pulled
+   into `gui/data`, so history survives a restart. A re-run of an RVA is a new
+   entry; comparing a trace against the one it repeats is the point of keeping
+   history.
+2. **Step registers** — the selected step's registers *from the CSV*, with the
+   values that moved since the previous step marked. A run captured without
+   `--regs` says so and falls back to live registers.
+3. **Flow trace** — the rows, windowed around the selected step. Every row is a
+   widget DPG lays out each frame, so a 10k-step run renders `_FLOW_MAX_ROWS`
+   of itself, not all of it.
+
+Live Registers cannot be the centre pane: `_derive_pane_column` rejects a pane
+that changes column between modes, and never re-parenting a widget is the
+invariant the shell is built on. Step registers are a second pane, not a move.
+
+Watch left Trace mode — a watch list has nothing to say about a finished run.
+
 ## Open Questions
 
-- Does Trace mode need Registers, or is Flow + Watch enough? Registers during a
-  10k-step flow may be pure noise.
 - Log mode is full-width single-pane — is that a mode at all, or should it be
   F12 zoom on a Log pane that lives in Inspect's right column?
-- Does TLS refresh on thread select, on every stop, or on demand? Every stop is
-  the nicest and the most expensive.
+- ~~Does TLS refresh on thread select, on every stop, or on demand?~~ Every
+  stop. On thread select alone, a plain hit showed `(no tls)`, which reads as
+  "this thread has none". The dump spans more polls than one, so the parse runs
+  over a rolling window of output rather than a single batch.
+- ~~Does Trace mode need Registers?~~ Yes, but per-step ones from the CSV.
 - Where does the breakpoint table live? It is absent from all four modes above.
