@@ -111,6 +111,10 @@ def cell_tag(col: str) -> str:
 def mode_button_tag(mode: str) -> str:
     return f"modebtn_{mode}"
 
+
+def text_toggle_tag(pane: str) -> str:
+    return f"txtmode_{pane}"
+
 # ── Mono font tag ────────────────────────────────────────────────────
 _MONO_FONT = "font_mono"
 
@@ -228,15 +232,24 @@ def _pane_visible(pane: str) -> bool:
     return pane in modes.MODES[_active_mode].panes[modes.PANE_COLUMN[pane]]
 
 
-def _should_paint(pane: str) -> bool:
-    """Repaint `pane` only if it changed *and* someone can see it.
+def _take_paint(pane: str) -> bool:
+    """Claim the right to repaint `pane`, if it changed and someone can see it.
 
     The flag is consumed only when the paint actually happens, so a pane that
     stays hidden across many stops is still dirty when its mode is selected.
+
+    A pane in text mode is rendered here and the caller told to stop: the
+    selectable buffer replaces the coloured rows wholesale, so every painter
+    gets text mode from this one branch rather than repeating it.
     """
     if not _pane_visible(pane):
         return False
-    return _dirty.take(pane)
+    if not _dirty.take(pane):
+        return False
+    if pane in _text_mode:
+        _paint_as_text(pane)
+        return False
+    return True
 
 
 def _repaint_revealed() -> None:
@@ -248,7 +261,7 @@ def _repaint_revealed() -> None:
 
 def _populate_regs() -> None:
     """Fill the registers pane with colored text."""
-    if not _should_paint("pane_regs"):
+    if not _take_paint("pane_regs"):
         return
     tag = TAG["pane_regs"]
     dpg.delete_item(tag, children_only=True)
@@ -278,7 +291,7 @@ def _render_regs(tag: str, regs: list) -> None:
 
 def _populate_disasm() -> None:
     """Fill the disasm pane with colored text."""
-    if not _should_paint("pane_disasm"):
+    if not _take_paint("pane_disasm"):
         return
     tag = TAG["pane_disasm"]
     dpg.delete_item(tag, children_only=True)
@@ -292,12 +305,13 @@ def _populate_disasm() -> None:
                 dpg.add_text(">>", color=theme.ACCENT_GREEN)
             else:
                 dpg.add_text("  ", color=theme.TEXT_DIM)
-            # Address
-            addr_s = f" 0x{d.address:x}"
-            dpg.add_text(addr_s, color=theme.TEXT_DIM)
-            # Symbol
+            # Address and symbol — one click sends the RVA to the flow box,
+            # which is where a hand-copied address was headed anyway.
+            label = f" 0x{d.address:x}"
             if d.symbol:
-                dpg.add_text(f"<{d.symbol}>", color=theme.ACCENT_GREEN)
+                label += f"<{d.symbol}>"
+            dpg.add_selectable(label=label, user_data=_disasm_address(d),
+                               callback=_cb_use_address, width=0)
             # Spacing
             dpg.add_text("\t", color=theme.TEXT)
             # Mnemonic — amber for most, red for branches
@@ -310,7 +324,7 @@ def _populate_disasm() -> None:
 
 def _populate_backtrace() -> None:
     """Fill the backtrace pane with colored text."""
-    if not _should_paint("pane_backtrace"):
+    if not _take_paint("pane_backtrace"):
         return
     tag = TAG["pane_backtrace"]
     dpg.delete_item(tag, children_only=True)
@@ -328,7 +342,7 @@ def _populate_backtrace() -> None:
 def _populate_memory(mem_lines: list[tuple[int, bytes]] | None = None) -> None:
     """Fill the memory pane with colored hex dump."""
     global _accumulated_reg_mem
-    if not _should_paint("pane_memory"):
+    if not _take_paint("pane_memory"):
         return
     data = mem_lines if mem_lines is not None else _accumulated_reg_mem
     tag = TAG["pane_memory"]
@@ -348,7 +362,7 @@ def _populate_memory(mem_lines: list[tuple[int, bytes]] | None = None) -> None:
 
 def _populate_breakpoints() -> None:
     """Fill the breakpoints pane with colored text."""
-    if not _should_paint("pane_breakpoints"):
+    if not _take_paint("pane_breakpoints"):
         return
     tag = TAG["pane_breakpoints"]
     dpg.delete_item(tag, children_only=True)
@@ -380,7 +394,7 @@ def _cb_select_thread(sender, app_data, user_data):
 
 def _populate_threads() -> None:
     """Fill the threads pane with colored text."""
-    if not _should_paint("pane_threads"):
+    if not _take_paint("pane_threads"):
         return
     tag = TAG["pane_threads"]
     dpg.delete_item(tag, children_only=True)
@@ -411,7 +425,7 @@ _TLS_CLASS_COLOR = {
 
 def _populate_tls() -> None:
     """Fill the TLS pane with class-coloured stack_and_tls slots."""
-    if not _should_paint("pane_tls"):
+    if not _take_paint("pane_tls"):
         return
     tag = TAG["pane_tls"]
     dpg.delete_item(tag, children_only=True)
@@ -455,6 +469,10 @@ _COPY_SOURCES = {
                              _session.last_threads)),
     "pane_tls":         ("TLS",
                          lambda: textdump.tls_to_text(_session.last_tls)),
+    "pane_flow":        ("Flow trace",
+                         lambda: flowtrace.flow_to_text(_flow_run())),
+    "pane_flow_history": ("Flow history", lambda: _flow_history_to_text()),
+    "pane_flow_regs":   ("Step registers", lambda: _flow_regs_to_text()),
     "pane_log":         ("Log",
                          lambda: textdump.log_to_text(_session.transcript)),
 }
@@ -469,6 +487,56 @@ _ctx_pane: str | None = None
 def _copy(text: str, what: str) -> None:
     dpg.set_clipboard_text(text)
     _append_log(f"[GUI] copied {what} ({len(text)} chars)")
+
+
+def _disasm_address(d) -> str:
+    """The half of a disasm row worth reusing.
+
+    `flow` and the breakpoint commands take a library-relative offset, so
+    `0x7ab60e0078<libloader.so+0x1fb078>` is worth `0x1fb078` — the absolute
+    address only helps when there is no symbol to relativise against.
+    """
+    if d.symbol and "+0x" in d.symbol:
+        return "0x" + d.symbol.split("+0x", 1)[1].strip(">")
+    return f"0x{d.address:x}"
+
+
+@_safe
+def _cb_use_address(sender, app_data, user_data):
+    """Clipboard plus the flow box: the two places a clicked address goes."""
+    addr = user_data
+    _copy(addr, addr)
+    dpg.set_value(TAG["input_flow_addr"], addr)
+
+
+# ── Selectable text mode ─────────────────────────────────────────────
+#
+# A pane in text mode renders as one readonly multiline input instead of
+# coloured rows. That widget is the only one in DPG with a selection model, so
+# it is the only way to drag-select an RVA and press Ctrl+C.
+
+_text_mode: set = set()
+
+
+@_safe
+def _cb_toggle_text(sender, app_data, user_data):
+    pane = user_data
+    if pane in _text_mode:
+        _text_mode.discard(pane)
+    else:
+        _text_mode.add(pane)
+    dpg.configure_item(text_toggle_tag(pane),
+                       label="COLOR" if pane in _text_mode else "TEXT")
+    _dirty.mark(pane)
+    _PANE_PAINTERS[pane]()
+
+
+def _paint_as_text(pane: str) -> None:
+    tag = TAG[pane]
+    dpg.delete_item(tag, children_only=True)
+    _label, getter = _COPY_SOURCES[pane]
+    dpg.add_input_text(parent=tag, multiline=True, readonly=True,
+                       default_value=getter(), width=-1, height=-1)
 
 
 @_safe
@@ -598,6 +666,22 @@ def _cb_flow_step(sender, app_data, user_data):
     _dirty.mark_all(("pane_flow", "pane_flow_regs"))
 
 
+def _flow_history_to_text() -> str:
+    if not _flow_runs:
+        return "(no flow runs)"
+    return "\n".join(f"{r.label}  {r.steps} steps  {r.path}" for r in _flow_runs)
+
+
+def _flow_regs_to_text() -> str:
+    run = _flow_run()
+    if run is None:
+        return "(no step selected)"
+    if not run.has_regs:
+        return textdump.regs_to_text(_session.last_regs)
+    return "\n".join(f"{name:<6} 0x{value:x}"
+                     for name, value in run.regs_at(_flow_step))
+
+
 def _flow_window(total: int, selected: int) -> tuple:
     """Half-open row range to render, kept centred on `selected`."""
     if total <= _FLOW_MAX_ROWS:
@@ -607,7 +691,7 @@ def _flow_window(total: int, selected: int) -> tuple:
 
 
 def _populate_flow() -> None:
-    if not _should_paint("pane_flow"):
+    if not _take_paint("pane_flow"):
         return
     tag = TAG["pane_flow"]
     dpg.delete_item(tag, children_only=True)
@@ -630,7 +714,7 @@ def _populate_flow() -> None:
 
 
 def _populate_flow_history() -> None:
-    if not _should_paint("pane_flow_history"):
+    if not _take_paint("pane_flow_history"):
         return
     tag = TAG["pane_flow_history"]
     dpg.delete_item(tag, children_only=True)
@@ -646,7 +730,7 @@ def _populate_flow_history() -> None:
 
 
 def _populate_flow_regs() -> None:
-    if not _should_paint("pane_flow_regs"):
+    if not _take_paint("pane_flow_regs"):
         return
     tag = TAG["pane_flow_regs"]
     dpg.delete_item(tag, children_only=True)
@@ -674,7 +758,7 @@ def _populate_flow_regs() -> None:
 
 
 def _populate_watch() -> None:
-    if not _should_paint("pane_watch"):
+    if not _take_paint("pane_watch"):
         return
 
 
@@ -682,7 +766,7 @@ def _populate_log() -> None:
     # _append_log writes each line as it arrives, so there is nothing to
     # repaint — but the flag still clears only when the pane is visible, so the
     # log obeys the same protocol as everything else.
-    _should_paint("pane_log")
+    _take_paint("pane_log")
 
 
 _PANE_PAINTERS = {
@@ -1198,18 +1282,31 @@ def _build_command_bar() -> None:
 # hides the section wrapper and rewrites column weights; it never rebuilds,
 # re-parents, or duplicates a pane.
 
+def _pane_title(pane: str, label: str) -> None:
+    """Pane header plus its text-mode toggle.
+
+    Both sit on one row so the header stays the single line ``_PANE_CHROME``
+    budgets for it.
+    """
+    with dpg.group(horizontal=True):
+        dpg.add_text(label, color=CLR_CYAN)
+        if pane in _COPY_SOURCES:
+            dpg.add_button(label="TEXT", tag=text_toggle_tag(pane), small=True,
+                           user_data=pane, callback=_cb_toggle_text)
+
+
 def _pane_body(pane: str, empty: str) -> None:
     with dpg.child_window(tag=TAG[pane], height=-1, width=-1, border=False):
         dpg.add_text(empty, color=theme.TEXT_DIM)
 
 
 def _build_pane_regs() -> None:
-    _hdr("REGISTERS")
+    _pane_title("pane_regs", "REGISTERS")
     _pane_body("pane_regs", "(no registers)")
 
 
 def _build_pane_breakpoints() -> None:
-    _hdr("BREAKPOINTS")
+    _pane_title("pane_breakpoints", "BREAKPOINTS")
     with dpg.group(horizontal=True):
         dpg.add_combo(
             items=["b (file offset)", "vb (virtual)", "hb (hardware)",
@@ -1222,12 +1319,12 @@ def _build_pane_breakpoints() -> None:
 
 
 def _build_pane_disasm() -> None:
-    _hdr("DISASSEMBLY")
+    _pane_title("pane_disasm", "DISASSEMBLY")
     _pane_body("pane_disasm", "(no disassembly)")
 
 
 def _build_pane_memory() -> None:
-    _hdr("MEMORY")
+    _pane_title("pane_memory", "MEMORY")
     with dpg.group(horizontal=True):
         _hdr("Addr"); dpg.add_input_text(tag=TAG["input_examine_addr"],
                                          width=150, hint="0x...")
@@ -1245,12 +1342,12 @@ def _build_pane_memory() -> None:
 
 
 def _build_pane_backtrace() -> None:
-    _hdr("BACKTRACE")
+    _pane_title("pane_backtrace", "BACKTRACE")
     _pane_body("pane_backtrace", "(no backtrace)")
 
 
 def _build_pane_flow() -> None:
-    _hdr("FLOW TRACE")
+    _pane_title("pane_flow", "FLOW TRACE")
     with dpg.group(horizontal=True):
         _hdr("Addr"); dpg.add_input_text(tag=TAG["input_flow_addr"],
                                          width=140, hint="0x...")
@@ -1268,27 +1365,27 @@ def _build_pane_flow() -> None:
 
 
 def _build_pane_flow_history() -> None:
-    _hdr("FLOW HISTORY")
+    _pane_title("pane_flow_history", "FLOW HISTORY")
     _pane_body("pane_flow_history", "(no flow runs)")
 
 
 def _build_pane_flow_regs() -> None:
-    _hdr("STEP REGISTERS")
+    _pane_title("pane_flow_regs", "STEP REGISTERS")
     _pane_body("pane_flow_regs", "(no step selected)")
 
 
 def _build_pane_threads() -> None:
-    _hdr("THREADS")
+    _pane_title("pane_threads", "THREADS")
     _pane_body("pane_threads", "(no threads)")
 
 
 def _build_pane_tls() -> None:
-    _hdr("TLS")
+    _pane_title("pane_tls", "TLS")
     _pane_body("pane_tls", "(no tls)")
 
 
 def _build_pane_watch() -> None:
-    _hdr("WATCH")
+    _pane_title("pane_watch", "WATCH")
     with dpg.group(horizontal=True):
         _hdr("Name"); dpg.add_input_text(tag=TAG["input_display_name"],
                                          width=90, hint="myvar")
@@ -1302,7 +1399,7 @@ def _build_pane_watch() -> None:
 
 
 def _build_pane_log() -> None:
-    _hdr("LOG / TRANSCRIPT")
+    _pane_title("pane_log", "LOG / TRANSCRIPT")
     _pane_body("pane_log", "")
 
 
