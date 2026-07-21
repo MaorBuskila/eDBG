@@ -131,6 +131,122 @@ def test_the_window_follows_the_selected_step(built_ctx, tmp_path):
         "a step outside the window cannot be reviewed"
 
 
+# ── v4: the history tree ─────────────────────────────────────────────
+
+def _children(item) -> list:
+    return dpg.get_item_children(item, 1)
+
+
+def _tree_nodes() -> list:
+    return _children(app.TAG["pane_flow_history"])
+
+
+def _child_labels(item) -> list:
+    out = []
+    for c in _children(item):
+        cfg = dpg.get_item_configuration(c)
+        if cfg.get("label"):
+            out.append(cfg["label"])
+    return out
+
+
+META = '"# lib=libloader.so,rva=0x1c6f68,symbol=Java_com_foo_bar"\n'
+
+
+def test_a_run_root_names_the_function_it_entered(built_ctx, tmp_path):
+    app._add_flow_run(_run(tmp_path, "libloader_0x1c6f68_flow.csv", META + BARE))
+    app._populate_flow_history()
+    label = dpg.get_item_configuration(_tree_nodes()[0])["label"]
+    assert "libloader+0x1c6f68" in label
+    assert "Java_com_foo_bar" in label
+    assert "3 steps" in label
+
+
+def test_a_run_without_a_symbol_still_reads_cleanly(built_ctx, tmp_path):
+    app._add_flow_run(_run(tmp_path, "libloader_0x1c6f68_flow.csv", BARE))
+    app._populate_flow_history()
+    label = dpg.get_item_configuration(_tree_nodes()[0])["label"]
+    assert "libloader+0x1c6f68" in label
+    assert "<>" not in label and "  <" not in label
+
+
+def test_the_selected_run_lists_its_steps(built_ctx, tmp_path):
+    app._add_flow_run(_run(tmp_path, "libloader_0x1c6f68_flow.csv", BARE))
+    app._populate_flow_history()
+    labels = _child_labels(_tree_nodes()[0])
+    assert len(labels) == 3
+    assert "0x1c6f6c" in labels[1]
+
+
+def test_an_unselected_run_costs_one_widget_not_its_whole_trace(built_ctx, tmp_path):
+    # Every DPG row is laid out each frame whether its node is open or not, so
+    # history of ten long runs must not be ten long lists.
+    text = "step,va,rva\n" + "".join(
+        f"{i},0x{0x1000 + i:x},0x{i:x}\n" for i in range(app._FLOW_MAX_ROWS * 2))
+    app._add_flow_run(_run(tmp_path, "big_0x1_flow.csv", text))
+    app._add_flow_run(_run(tmp_path, "b_0x2_flow.csv", BARE))
+    app._populate_flow_history()
+    assert len(_children(_tree_nodes()[1])) == 1
+
+
+def test_opening_an_older_run_selects_it_at_its_first_step(built_ctx, tmp_path):
+    app._add_flow_run(_run(tmp_path, "a_0x1_flow.csv", BARE))
+    app._add_flow_run(_run(tmp_path, "b_0x2_flow.csv", BARE))
+    app._cb_flow_step(None, True, 2)
+    app._populate_flow_history()
+    opener = _children(_tree_nodes()[1])[0]
+    cfg = dpg.get_item_configuration(opener)
+    app._cb_flow_pick(None, True, cfg["user_data"])
+    assert app._flow_selected == 1 and app._flow_step == 0
+
+
+def test_clicking_a_step_selects_that_step_of_that_run(built_ctx, tmp_path):
+    app._add_flow_run(_run(tmp_path, "a_0x1_flow.csv", BARE))
+    app._populate_flow_history()
+    step_row = _children(_tree_nodes()[0])[2]
+    cfg = dpg.get_item_configuration(step_row)
+    app._cb_flow_pick(None, True, cfg["user_data"])
+    assert (app._flow_selected, app._flow_step) == (0, 2)
+
+
+def test_picking_a_step_marks_every_detail_pane(built_ctx, tmp_path):
+    app._add_flow_run(_run(tmp_path, "a_0x1_flow.csv", BARE))
+    app._dirty.clear()
+    app._cb_flow_pick(None, True, (0, 1))
+    assert {"pane_flow", "pane_flow_regs", "pane_flow_mem",
+            "pane_flow_tls"} <= app._dirty.pending()
+
+
+def test_a_long_run_lists_a_window_of_its_steps(built_ctx, tmp_path):
+    text = "step,va,rva\n" + "".join(
+        f"{i},0x{0x1000 + i:x},0x{i:x}\n" for i in range(app._FLOW_MAX_ROWS * 2))
+    app._add_flow_run(_run(tmp_path, "big_0x1_flow.csv", text))
+    app._populate_flow_history()
+    # windowed steps plus the note saying what was clipped
+    assert len(_children(_tree_nodes()[0])) == app._FLOW_MAX_ROWS + 1
+
+
+def test_the_step_window_follows_the_selection(built_ctx, tmp_path):
+    text = "step,va,rva\n" + "".join(
+        f"{i},0x{0x1000 + i:x},0x{i:x}\n" for i in range(app._FLOW_MAX_ROWS * 2))
+    app._add_flow_run(_run(tmp_path, "big_0x1_flow.csv", text))
+    deep = app._FLOW_MAX_ROWS * 2 - 1
+    app._cb_flow_pick(None, True, (0, deep))
+    app._populate_flow_history()
+    labels = _child_labels(_tree_nodes()[0])
+    assert any(str(deep) in l for l in labels), \
+        "a step outside the window cannot be reached from the tree"
+
+
+def test_the_launch_controls_live_with_the_history_they_append_to(built_ctx):
+    # Run Flow creates the entries this pane lists, and the run-control row it
+    # used to sit beside is gone in Trace mode.
+    section = dpg.get_item_children(app.section_tag("pane_flow_history"), 1)
+    assert app.TAG["btn_flow"] in [dpg.get_item_alias(i) or i
+                                   for group in section
+                                   for i in dpg.get_item_children(group, 1)]
+
+
 # ── Task 5: the history pane ─────────────────────────────────────────
 
 def test_history_lists_every_run_newest_first(built_ctx, tmp_path):

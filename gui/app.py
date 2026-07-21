@@ -610,7 +610,13 @@ _FLOW_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 #: selected step instead of the whole run.
 _FLOW_MAX_ROWS = 500
 
-_FLOW_PANES = ("pane_flow", "pane_flow_history", "pane_flow_regs")
+_FLOW_PANES = ("pane_flow", "pane_flow_history", "pane_flow_regs",
+               "pane_flow_mem", "pane_flow_tls")
+
+#: Panes showing the selected step. The history tree is not one of them — it
+#: owns the selection rather than following it.
+_FLOW_STEP_PANES = ("pane_flow", "pane_flow_regs", "pane_flow_mem",
+                    "pane_flow_tls")
 
 _flow_runs: list = []
 _flow_selected: int | None = None
@@ -665,7 +671,19 @@ def _cb_flow_run(sender, app_data, user_data):
 def _cb_flow_step(sender, app_data, user_data):
     global _flow_step
     _flow_step = user_data
-    _dirty.mark_all(("pane_flow", "pane_flow_regs"))
+    _dirty.mark_all(_FLOW_STEP_PANES)
+
+
+@_safe
+def _cb_flow_pick(sender, app_data, user_data):
+    """Select a run and a step at once — a row in the tree names both.
+
+    The tree is the only selector in Trace mode, and a step row belongs to
+    exactly one run, so there is nothing for a separate run click to add.
+    """
+    global _flow_selected, _flow_step
+    _flow_selected, _flow_step = user_data
+    _dirty.mark_all(_FLOW_PANES)
 
 
 def _flow_history_to_text() -> str:
@@ -715,7 +733,19 @@ def _populate_flow() -> None:
                      parent=tag, color=theme.TEXT_DIM)
 
 
+def _flow_run_label(run) -> str:
+    when = time.strftime("%H:%M:%S", time.localtime(run.mtime))
+    symbol = f"  {run.symbol}" if run.symbol else ""
+    return f"{run.label}{symbol}  {run.steps} steps  {when}"
+
+
 def _populate_flow_history() -> None:
+    """Runs are folders, steps are files.
+
+    Only the selected run lists its steps. Every DPG row is laid out each frame
+    whether its node is open or not, so a history of long runs would otherwise
+    cost the frame every step of every one of them.
+    """
     if not _take_paint("pane_flow_history"):
         return
     tag = TAG["pane_flow_history"]
@@ -724,11 +754,22 @@ def _populate_flow_history() -> None:
         dpg.add_text("(no flow runs)", parent=tag, color=theme.TEXT_DIM)
         return
     for i, run in enumerate(_flow_runs):
-        when = time.strftime("%H:%M:%S", time.localtime(run.mtime))
-        dpg.add_selectable(label=f"{run.label}  {run.steps} steps  {when}",
-                           parent=tag, user_data=i,
-                           default_value=(i == _flow_selected),
-                           callback=_cb_flow_run)
+        selected = i == _flow_selected
+        node = dpg.add_tree_node(label=_flow_run_label(run), parent=tag,
+                                 default_open=selected)
+        if not selected:
+            dpg.add_selectable(label=f"open  {run.steps} steps", parent=node,
+                               user_data=(i, 0), callback=_cb_flow_pick)
+            continue
+        start, end = _flow_window(run.steps, _flow_step)
+        for j in range(start, end):
+            dpg.add_selectable(label=f"{j:<5} {run.lib}+0x{run.rows[j].rva:x}",
+                               parent=node, user_data=(i, j),
+                               default_value=(j == _flow_step),
+                               callback=_cb_flow_pick)
+        if end - start < run.steps:
+            dpg.add_text(f"(showing steps {start}-{end - 1} of {run.steps})",
+                         parent=node, color=theme.TEXT_DIM)
 
 
 def _populate_flow_regs() -> None:
@@ -1362,6 +1403,16 @@ def _build_pane_backtrace() -> None:
 
 def _build_pane_flow() -> None:
     _pane_title("pane_flow", "FLOW TRACE")
+    _pane_body("pane_flow", "(no flow trace)")
+
+
+def _build_pane_flow_history() -> None:
+    """The tree, and the controls that create what it lists.
+
+    Run Flow appends to this history, and the run-control row it used to sit
+    beside is not on screen in Trace mode.
+    """
+    _pane_title("pane_flow_history", "FLOW HISTORY")
     with dpg.group(horizontal=True):
         _hdr("Addr"); dpg.add_input_text(tag=TAG["input_flow_addr"],
                                          width=140, hint="0x...")
@@ -1375,11 +1426,6 @@ def _build_pane_flow() -> None:
         dpg.add_checkbox(label="Quiet", tag=TAG["chk_flow_quiet"])
         dpg.add_button(label="Run Flow", tag=TAG["btn_flow"],
                        callback=_cb_flow, enabled=False)
-    _pane_body("pane_flow", "(no flow trace)")
-
-
-def _build_pane_flow_history() -> None:
-    _pane_title("pane_flow_history", "FLOW HISTORY")
     _pane_body("pane_flow_history", "(no flow runs)")
 
 
@@ -1471,8 +1517,8 @@ _PANE_CHROME = {
     "pane_disasm":      _HEADER_H,
     "pane_memory":      _HEADER_H + 2 * _CONTROL_ROW_H,
     "pane_backtrace":   _HEADER_H,
-    "pane_flow":        _HEADER_H + 2 * _CONTROL_ROW_H,
-    "pane_flow_history": _HEADER_H,
+    "pane_flow":        _HEADER_H,
+    "pane_flow_history": _HEADER_H + 2 * _CONTROL_ROW_H,
     "pane_flow_regs":   _HEADER_H,
     "pane_flow_mem":    _HEADER_H,
     "pane_flow_tls":    _HEADER_H,
