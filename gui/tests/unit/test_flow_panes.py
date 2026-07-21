@@ -327,6 +327,56 @@ def test_seeding_an_empty_dir_selects_nothing(built_ctx, tmp_path):
     assert app._flow_runs == [] and app._flow_selected is None
 
 
+# ── v4: only a finished run enters history ───────────────────────────
+#
+# Go announces the CSV path twice: once when it opens the file, once when it
+# has flushed and closed it (cli/repl.go:1181 and :1320/:1322). Treating the
+# first as completion pulls a file the csv.Writer has not flushed a byte into.
+
+FLOW_START = ("Flow trace: 0x1c6f68 → /data/local/tmp/libloader_0x1c6f68_flow.csv,"
+              " max 10000 steps, over=0, output:"
+              " /data/local/tmp/libloader_0x1c6f68_flow.csv")
+FLOW_DONE = "Trace saved to /data/local/tmp/libloader_0x1c6f68_flow.csv (2 steps)"
+FLOW_INTERRUPTED = ("\x1b[33mFlow trace interrupted after 7 steps. Partial trace"
+                    " saved to /data/local/tmp/libloader_0x1c6f68_flow.csv\x1b[0m")
+
+
+def test_the_announcement_that_a_run_started_is_not_a_completion():
+    assert app._flow_csv_path(FLOW_START) is None
+
+
+def test_a_finished_run_is_recognised_by_its_completion_line():
+    assert app._flow_csv_path(FLOW_DONE) == \
+        "/data/local/tmp/libloader_0x1c6f68_flow.csv"
+
+
+def test_an_interrupted_run_is_still_a_finished_file():
+    # Partial data is what the operator has; it is worth keeping.
+    assert app._flow_csv_path(FLOW_INTERRUPTED) == \
+        "/data/local/tmp/libloader_0x1c6f68_flow.csv"
+
+
+def test_a_run_enters_history_exactly_once(built_ctx, tmp_path, monkeypatch):
+    pulls = []
+
+    def fake_pull(src, dest):
+        pulls.append(src)
+        if src.endswith("_flow_tls.csv"):
+            return False
+        with open(dest, "w") as fh:
+            fh.write(BARE)
+        return True
+
+    monkeypatch.setattr(app._session, "pull_file", fake_pull)
+    monkeypatch.setattr(app, "_FLOW_DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(app._session, "poll_and_parse", lambda: [])
+    for line in (FLOW_START, "[Flow Step #0]", FLOW_DONE):
+        app._scan_for_finished_flow([line])
+    assert len(app._flow_runs) == 1
+    assert pulls.count("/data/local/tmp/libloader_0x1c6f68_flow.csv") == 1, \
+        "the run was pulled before Go had flushed a byte of it"
+
+
 def test_the_tls_sidecar_is_pulled_with_its_run(built_ctx, tmp_path, monkeypatch):
     remote = "/data/local/tmp/libloader_0x1c6f68_flow.csv"
     remote_tls = "/data/local/tmp/libloader_0x1c6f68_flow_tls.csv"
@@ -340,7 +390,7 @@ def test_the_tls_sidecar_is_pulled_with_its_run(built_ctx, tmp_path, monkeypatch
 
     monkeypatch.setattr(app._session, "pull_file", fake_pull)
     monkeypatch.setattr(app, "_FLOW_DATA_DIR", str(tmp_path))
-    app._handle_flow_csv([f"Trace saved to {remote} (3 steps)"])
+    app._scan_for_finished_flow([f"Trace saved to {remote} (3 steps)"])
     assert remote_tls in asked
     assert app._flow_runs[0].has_tls
 
@@ -358,7 +408,7 @@ def test_a_run_without_a_sidecar_still_enters_history(built_ctx, tmp_path,
 
     monkeypatch.setattr(app._session, "pull_file", fake_pull)
     monkeypatch.setattr(app, "_FLOW_DATA_DIR", str(tmp_path))
-    app._handle_flow_csv([f"Trace saved to {remote} (3 steps)"])
+    app._scan_for_finished_flow([f"Trace saved to {remote} (3 steps)"])
     assert len(app._flow_runs) == 1
     assert not app._flow_runs[0].has_tls
 
@@ -396,7 +446,7 @@ def test_a_pulled_csv_enters_history(built_ctx, tmp_path, monkeypatch):
 
     monkeypatch.setattr(app._session, "pull_file", fake_pull)
     monkeypatch.setattr(app, "_FLOW_DATA_DIR", str(tmp_path))
-    app._handle_flow_csv([f"Trace saved to {remote} (3 steps)"])
+    app._scan_for_finished_flow([f"Trace saved to {remote} (3 steps)"])
     assert len(app._flow_runs) == 1
     assert app._flow_runs[0].rva == 0x1C6F68
 

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import functools
+import re
 import signal
 import time
 from collections import deque
@@ -1269,12 +1270,7 @@ def _frame_update():
 
     _update_run_controls()
 
-    # Detect flow CSV completion (look for "flow finished" in new lines)
-    for line in new_lines:
-        clean = parse.strip_ansi(line).lower()
-        if "flow" in clean and ("finished" in clean or "done" in clean or "csv" in clean):
-            _handle_flow_csv(new_lines)
-            break
+    _scan_for_finished_flow(new_lines)
 
     # Parse inline responses (memory examine, breakpoint info, thread info,
     # backtrace, tls). Handlers mark panes; painting happens once, below, and
@@ -1313,32 +1309,46 @@ def _frame_update():
     _refresh_panes()
 
 
-def _handle_flow_csv(lines: list[str]) -> None:
+#: Go announces the CSV path twice — when it opens the file
+#: ([repl.go:1181](cli/repl.go:1181)) and when it has flushed and closed it
+#: ([repl.go:1320](cli/repl.go:1320)). Only the second means there is anything
+#: to read: the csv.Writer buffers, so at the first the file is still empty.
+#: Both completion forms, whole and interrupted, say "saved to".
+_FLOW_DONE_RE = re.compile(r"saved to (\S+\.csv)")
+
+
+def _flow_csv_path(line: str) -> str | None:
+    """The device path of a run that just finished, or None for any other line."""
+    m = _FLOW_DONE_RE.search(parse.strip_ansi(line))
+    return m.group(1) if m else None
+
+
+def _scan_for_finished_flow(lines: list[str]) -> None:
+    for line in lines:
+        path = _flow_csv_path(line)
+        if path:
+            _handle_flow_csv(path)
+            return
+
+
+def _handle_flow_csv(device_path: str) -> None:
     """Pull the finished run off the device and enter it into history."""
     os.makedirs(_FLOW_DATA_DIR, exist_ok=True)
-    for line in lines:
-        clean = parse.strip_ansi(line)
-        if ".csv" not in clean.lower():
-            continue
-        for token in clean.split():
-            if not token.endswith(".csv"):
-                continue
-            local = os.path.join(_FLOW_DATA_DIR, os.path.basename(token))
-            if not _session.pull_file(token, local):
-                _append_log(f"[GUI] Failed to pull {token}")
-                return
-            # The sidecar exists only under --tls, so a failed pull is the
-            # normal case and costs the run its TLS, never its entry.
-            sidecar = token[:-len(".csv")] + "_tls.csv"
-            _session.pull_file(
-                sidecar, os.path.join(_FLOW_DATA_DIR, os.path.basename(sidecar)))
-            run = flowtrace.parse_flow_csv(local)
-            if run is None:
-                _append_log(f"[GUI] Flow CSV unreadable: {local}")
-                return
-            _add_flow_run(run)
-            _append_log(f"[GUI] Flow {run.label}: {run.steps} steps → {local}")
-            return
+    local = os.path.join(_FLOW_DATA_DIR, os.path.basename(device_path))
+    if not _session.pull_file(device_path, local):
+        _append_log(f"[GUI] Failed to pull {device_path}")
+        return
+    # The sidecar exists only under --tls, so a failed pull is the normal case
+    # and costs the run its TLS, never its entry.
+    sidecar = device_path[:-len(".csv")] + "_tls.csv"
+    _session.pull_file(
+        sidecar, os.path.join(_FLOW_DATA_DIR, os.path.basename(sidecar)))
+    run = flowtrace.parse_flow_csv(local)
+    if run is None:
+        _append_log(f"[GUI] Flow CSV unreadable: {local}")
+        return
+    _add_flow_run(run)
+    _append_log(f"[GUI] Flow {run.label}: {run.steps} steps → {local}")
 
 
 # =====================================================================
