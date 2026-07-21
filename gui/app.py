@@ -10,9 +10,11 @@ from __future__ import annotations
 import os
 import functools
 import signal
+import time
 from collections import deque
 import dearpygui.dearpygui as dpg
 from gui.session import EdbgSession, State
+from gui import flowtrace
 from gui import parse
 from gui import textdump
 from gui import theme
@@ -245,10 +247,15 @@ def _populate_regs() -> None:
         return
     tag = TAG["pane_regs"]
     dpg.delete_item(tag, children_only=True)
-    if not _session.last_regs:
+    _render_regs(tag, _session.last_regs)
+
+
+def _render_regs(tag: str, regs: list) -> None:
+    """One row per live register. Shared with trace mode's `--regs` fallback."""
+    if not regs:
         dpg.add_text("(no registers)", parent=tag, color=theme.TEXT_DIM)
         return
-    for r in _session.last_regs:
+    for r in regs:
         with dpg.group(horizontal=True, parent=tag):
             # Register name — red for pointer regs, cyan otherwise
             is_ptr = bool(r.symbol or r.deref)
@@ -517,19 +524,148 @@ def _attach_copy_menus() -> None:
         print(f"[GUI] right-click copy unavailable: {exc}")
 
 
+# =====================================================================
+#  Flow traces  (finished runs on disk, not live process state)
+# =====================================================================
+
+_FLOW_DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
+
+#: Rows rendered at once. Every row is a widget DPG lays out each frame, and a
+#: 10k-step trace is unreadable anyway — so the pane shows a window around the
+#: selected step instead of the whole run.
+_FLOW_MAX_ROWS = 500
+
+_FLOW_PANES = ("pane_flow", "pane_flow_history", "pane_flow_regs")
+
+_flow_runs: list = []
+_flow_selected: int | None = None
+_flow_step: int = 0
+
+
+def _flow_run():
+    """The selected run, or None."""
+    if _flow_selected is None or not 0 <= _flow_selected < len(_flow_runs):
+        return None
+    return _flow_runs[_flow_selected]
+
+
+def _flow_changed_regs() -> set:
+    run = _flow_run()
+    return run.changed_at(_flow_step) if run else set()
+
+
+def _add_flow_run(run) -> None:
+    """Put a finished run at the head of history and select it.
+
+    A re-run of an RVA is a separate entry: comparing a trace against the one
+    it repeats is the reason to keep history at all.
+    """
+    global _flow_selected, _flow_step
+    if run is None:
+        return
+    _flow_runs.insert(0, run)
+    _flow_selected = 0
+    _flow_step = 0
+    _dirty.mark_all(_FLOW_PANES)
+
+
+def _seed_flow_history(directory: str | None = None) -> None:
+    """Adopt the CSVs already pulled, so history survives a GUI restart."""
+    global _flow_runs, _flow_selected, _flow_step
+    _flow_runs = flowtrace.discover_runs(directory or _FLOW_DATA_DIR)
+    _flow_selected = 0 if _flow_runs else None
+    _flow_step = 0
+    _dirty.mark_all(_FLOW_PANES)
+
+
+@_safe
+def _cb_flow_run(sender, app_data, user_data):
+    global _flow_selected, _flow_step
+    _flow_selected = user_data
+    _flow_step = 0
+    _dirty.mark_all(_FLOW_PANES)
+
+
+@_safe
+def _cb_flow_step(sender, app_data, user_data):
+    global _flow_step
+    _flow_step = user_data
+    _dirty.mark_all(("pane_flow", "pane_flow_regs"))
+
+
+def _flow_window(total: int, selected: int) -> tuple:
+    """Half-open row range to render, kept centred on `selected`."""
+    if total <= _FLOW_MAX_ROWS:
+        return 0, total
+    start = max(0, min(selected - _FLOW_MAX_ROWS // 2, total - _FLOW_MAX_ROWS))
+    return start, start + _FLOW_MAX_ROWS
+
+
 def _populate_flow() -> None:
     if not _should_paint("pane_flow"):
         return
+    tag = TAG["pane_flow"]
+    dpg.delete_item(tag, children_only=True)
+    run = _flow_run()
+    if run is None:
+        dpg.add_text("(no flow trace)", parent=tag, color=theme.TEXT_DIM)
+        return
+    with dpg.group(horizontal=True, parent=tag):
+        dpg.add_text(run.label, color=theme.ACCENT_AMBER)
+        dpg.add_text(f" {run.steps} steps", color=theme.TEXT_DIM)
+    start, end = _flow_window(run.steps, _flow_step)
+    for i in range(start, end):
+        dpg.add_selectable(label=flowtrace.step_to_text(run.rows[i]),
+                           parent=tag, user_data=i,
+                           default_value=(i == _flow_step),
+                           callback=_cb_flow_step)
+    if end - start < run.steps:
+        dpg.add_text(f"(showing steps {start}-{end - 1} of {run.steps})",
+                     parent=tag, color=theme.TEXT_DIM)
 
 
 def _populate_flow_history() -> None:
     if not _should_paint("pane_flow_history"):
         return
+    tag = TAG["pane_flow_history"]
+    dpg.delete_item(tag, children_only=True)
+    if not _flow_runs:
+        dpg.add_text("(no flow runs)", parent=tag, color=theme.TEXT_DIM)
+        return
+    for i, run in enumerate(_flow_runs):
+        when = time.strftime("%H:%M:%S", time.localtime(run.mtime))
+        dpg.add_selectable(label=f"{run.label}  {run.steps} steps  {when}",
+                           parent=tag, user_data=i,
+                           default_value=(i == _flow_selected),
+                           callback=_cb_flow_run)
 
 
 def _populate_flow_regs() -> None:
     if not _should_paint("pane_flow_regs"):
         return
+    tag = TAG["pane_flow_regs"]
+    dpg.delete_item(tag, children_only=True)
+    run = _flow_run()
+    if run is None:
+        dpg.add_text("(no step selected)", parent=tag, color=theme.TEXT_DIM)
+        return
+    if not run.has_regs:
+        dpg.add_text("(run captured without --regs — showing live registers)",
+                     parent=tag, color=theme.TEXT_DIM)
+        _render_regs(tag, _session.last_regs)
+        return
+    with dpg.group(horizontal=True, parent=tag):
+        dpg.add_text(f"step #{_flow_step}", color=theme.ACCENT_AMBER)
+        dpg.add_text(f" of {run.steps}", color=theme.TEXT_DIM)
+        dpg.add_text(f"  0x{run.rows[_flow_step].va:x}", color=theme.TEXT_DIM)
+    changed = _flow_changed_regs()
+    for name, value in run.regs_at(_flow_step):
+        with dpg.group(horizontal=True, parent=tag):
+            moved = name in changed
+            dpg.add_text(" *" if moved else "  ", color=theme.ACCENT_RED)
+            dpg.add_text(f"{name:<6}", color=theme.ACCENT_CYAN)
+            dpg.add_text(f"0x{value:x}",
+                         color=theme.ACCENT_RED if moved else theme.TEXT)
 
 
 def _populate_watch() -> None:
@@ -910,22 +1046,26 @@ def _frame_update():
 
 
 def _handle_flow_csv(lines: list[str]) -> None:
-    """Auto-pull flow CSV from device when flow completes."""
-    data_dir = os.path.join(os.path.dirname(__file__), "data")
-    os.makedirs(data_dir, exist_ok=True)
-    # Try to find CSV path in output
+    """Pull the finished run off the device and enter it into history."""
+    os.makedirs(_FLOW_DATA_DIR, exist_ok=True)
     for line in lines:
         clean = parse.strip_ansi(line)
-        if ".csv" in clean.lower():
-            # Extract path-like token
-            for token in clean.split():
-                if token.endswith(".csv"):
-                    local = os.path.join(data_dir, os.path.basename(token))
-                    if _session.pull_file(token, local):
-                        _append_log(f"[GUI] Flow CSV pulled → {local}")
-                    else:
-                        _append_log(f"[GUI] Failed to pull {token}")
-                    return
+        if ".csv" not in clean.lower():
+            continue
+        for token in clean.split():
+            if not token.endswith(".csv"):
+                continue
+            local = os.path.join(_FLOW_DATA_DIR, os.path.basename(token))
+            if not _session.pull_file(token, local):
+                _append_log(f"[GUI] Failed to pull {token}")
+                return
+            run = flowtrace.parse_flow_csv(local)
+            if run is None:
+                _append_log(f"[GUI] Flow CSV unreadable: {local}")
+                return
+            _add_flow_run(run)
+            _append_log(f"[GUI] Flow {run.label}: {run.steps} steps → {local}")
+            return
 
 
 # =====================================================================
@@ -1344,6 +1484,7 @@ def main():
     # no pixel arithmetic is needed for placement. Only stacked-pane heights
     # follow the viewport, because DPG tables do not resize rows.
     dpg.set_primary_window(TAG["root"], True)
+    _seed_flow_history()
     _set_mode(modes.DEFAULT_MODE)
     dpg.set_viewport_resize_callback(lambda *_: _apply_pane_heights())
 
