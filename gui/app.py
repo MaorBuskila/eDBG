@@ -17,6 +17,7 @@ from gui import parse
 from gui import textdump
 from gui import theme
 from gui import modes
+from gui.dirty import DirtySet
 from gui.theme import (
     CLR_GREEN, CLR_RED, CLR_YELLOW, CLR_CYAN, CLR_WHITE, CLR_GRAY, CLR_BLUE,
 )
@@ -211,8 +212,35 @@ def _update_run_controls() -> None:
 #  Pane population (colored child-window output)
 # =====================================================================
 
+_dirty = DirtySet()
+
+
+def _pane_visible(pane: str) -> bool:
+    return pane in modes.MODES[_active_mode].panes[modes.PANE_COLUMN[pane]]
+
+
+def _should_paint(pane: str) -> bool:
+    """Repaint `pane` only if it changed *and* someone can see it.
+
+    The flag is consumed only when the paint actually happens, so a pane that
+    stays hidden across many stops is still dirty when its mode is selected.
+    """
+    if not _pane_visible(pane):
+        return False
+    return _dirty.take(pane)
+
+
+def _repaint_revealed() -> None:
+    """Paint panes that became visible while carrying an unpainted change."""
+    for pane in modes.visible_panes(_active_mode):
+        if pane in _dirty.pending():
+            _PANE_PAINTERS[pane]()
+
+
 def _populate_regs() -> None:
     """Fill the registers pane with colored text."""
+    if not _should_paint("pane_regs"):
+        return
     tag = TAG["pane_regs"]
     dpg.delete_item(tag, children_only=True)
     if not _session.last_regs:
@@ -236,6 +264,8 @@ def _populate_regs() -> None:
 
 def _populate_disasm() -> None:
     """Fill the disasm pane with colored text."""
+    if not _should_paint("pane_disasm"):
+        return
     tag = TAG["pane_disasm"]
     dpg.delete_item(tag, children_only=True)
     if not _session.last_disasm:
@@ -266,6 +296,8 @@ def _populate_disasm() -> None:
 
 def _populate_backtrace() -> None:
     """Fill the backtrace pane with colored text."""
+    if not _should_paint("pane_backtrace"):
+        return
     tag = TAG["pane_backtrace"]
     dpg.delete_item(tag, children_only=True)
     if not _session.last_backtrace:
@@ -282,6 +314,8 @@ def _populate_backtrace() -> None:
 def _populate_memory(mem_lines: list[tuple[int, bytes]] | None = None) -> None:
     """Fill the memory pane with colored hex dump."""
     global _accumulated_reg_mem
+    if not _should_paint("pane_memory"):
+        return
     data = mem_lines if mem_lines is not None else _accumulated_reg_mem
     tag = TAG["pane_memory"]
     dpg.delete_item(tag, children_only=True)
@@ -300,6 +334,8 @@ def _populate_memory(mem_lines: list[tuple[int, bytes]] | None = None) -> None:
 
 def _populate_breakpoints() -> None:
     """Fill the breakpoints pane with colored text."""
+    if not _should_paint("pane_breakpoints"):
+        return
     tag = TAG["pane_breakpoints"]
     dpg.delete_item(tag, children_only=True)
     if not _session.last_breakpoints:
@@ -319,6 +355,8 @@ def _populate_breakpoints() -> None:
 
 def _populate_threads() -> None:
     """Fill the threads pane with colored text."""
+    if not _should_paint("pane_threads"):
+        return
     tag = TAG["pane_threads"]
     dpg.delete_item(tag, children_only=True)
     if not _session.last_threads:
@@ -332,6 +370,41 @@ def _populate_threads() -> None:
             dpg.add_text(f"[{t['index']}]", color=theme.ACCENT_AMBER)
             dpg.add_text(f" {t['tid']}:", color=theme.ACCENT_CYAN)
             dpg.add_text(f" {t['name']}", color=theme.TEXT)
+
+
+# What each TLS slot class means at a glance: a code pointer is not the same
+# kind of find as a junk qword, and colour is the fastest way to say so.
+_TLS_CLASS_COLOR = {
+    "code":   theme.ACCENT_RED,
+    "string": theme.ACCENT_GREEN,
+    "heap":   theme.ACCENT_AMBER,
+    "mapped": theme.ACCENT_AMBER,
+    "stack":  theme.ACCENT_CYAN,
+    "junk":   theme.TEXT_DIM,
+}
+
+
+def _populate_tls() -> None:
+    """Fill the TLS pane with class-coloured stack_and_tls slots."""
+    if not _should_paint("pane_tls"):
+        return
+    tag = TAG["pane_tls"]
+    dpg.delete_item(tag, children_only=True)
+    dump = _session.last_tls
+    if dump is None or not dump.slots:
+        dpg.add_text("(no tls)", parent=tag, color=theme.TEXT_DIM)
+        return
+    with dpg.group(horizontal=True, parent=tag):
+        dpg.add_text(f"tid {dump.tid}", color=theme.ACCENT_AMBER)
+        dpg.add_text(f" base 0x{dump.base:x}", color=theme.TEXT_DIM)
+    for s in dump.slots:
+        with dpg.group(horizontal=True, parent=tag):
+            dpg.add_text(f"+0x{s.offset:<4x}", color=theme.TEXT_DIM)
+            dpg.add_text(f" 0x{s.value:016x}", color=theme.ACCENT_CYAN)
+            dpg.add_text(f" {s.cls:<7}",
+                         color=_TLS_CLASS_COLOR.get(s.cls, theme.TEXT))
+            if s.annotation:
+                dpg.add_text(f" {s.annotation}", color=theme.ACCENT_GREEN)
 
 
 # =====================================================================
@@ -429,14 +502,41 @@ def _attach_copy_menus() -> None:
         print(f"[GUI] right-click copy unavailable: {exc}")
 
 
+def _populate_flow() -> None:
+    if not _should_paint("pane_flow"):
+        return
+
+
+def _populate_watch() -> None:
+    if not _should_paint("pane_watch"):
+        return
+
+
+def _populate_log() -> None:
+    # _append_log writes each line as it arrives, so there is nothing to
+    # repaint — but the flag still clears only when the pane is visible, so the
+    # log obeys the same protocol as everything else.
+    _should_paint("pane_log")
+
+
+_PANE_PAINTERS = {
+    "pane_regs":        _populate_regs,
+    "pane_breakpoints": _populate_breakpoints,
+    "pane_disasm":      _populate_disasm,
+    "pane_memory":      _populate_memory,
+    "pane_backtrace":   _populate_backtrace,
+    "pane_flow":        _populate_flow,
+    "pane_threads":     _populate_threads,
+    "pane_tls":         _populate_tls,
+    "pane_watch":       _populate_watch,
+    "pane_log":         _populate_log,
+}
+
+
 def _refresh_panes() -> None:
-    """Refresh all inspection panes."""
-    _populate_regs()
-    _populate_disasm()
-    _populate_backtrace()
-    _populate_memory()
-    _populate_breakpoints()
-    _populate_threads()
+    """Repaint every pane that is both dirty and visible."""
+    for paint in _PANE_PAINTERS.values():
+        paint()
 
 
 def _clear_panes() -> None:
@@ -734,7 +834,7 @@ def _frame_update():
             _last_rendered_hit = hit.hit_number
             # Seed accumulated memory with display-section data
             _accumulated_reg_mem = list(_session.last_memory)
-            _refresh_panes()
+            _dirty.mark_all(modes.PANES)
             # Auto-fetch backtrace, threads, and register memory
             _auto_fetch_on_hit()
     elif state == State.RUNNING:
@@ -752,29 +852,34 @@ def _frame_update():
             _handle_flow_csv(new_lines)
             break
 
-    # Parse inline responses (memory examine, breakpoint info, thread info, backtrace)
+    # Parse inline responses (memory examine, breakpoint info, thread info,
+    # backtrace, tls). Handlers mark panes; painting happens once, below, and
+    # only for panes the active mode actually shows.
     for line in new_lines:
         clean = parse.strip_ansi(line)
-        # Memory examine output
         mem = parse.parse_memory([clean])
         if mem:
             _accumulated_reg_mem.extend(mem)
-            _populate_memory(_accumulated_reg_mem)
-        # Breakpoint info
+            _dirty.mark("pane_memory")
         bps = parse.parse_breakpoints([clean])
         if bps:
             _session.last_breakpoints.extend(bps)
-            _populate_breakpoints()
-        # Thread info
+            _dirty.mark("pane_breakpoints")
         threads = parse.parse_threads([clean])
         if threads:
             _session.last_threads.extend(threads)
-            _populate_threads()
-        # Backtrace (inline from bt command response)
+            _dirty.mark("pane_threads")
         bt = parse.parse_backtrace([clean])
         if bt:
             _session.last_backtrace.extend(bt)
-            _populate_backtrace()
+            _dirty.mark("pane_backtrace")
+
+    tls = parse.parse_tls([parse.strip_ansi(l) for l in new_lines])
+    if tls is not None:
+        _session.last_tls = tls
+        _dirty.mark("pane_tls")
+
+    _refresh_panes()
 
 
 def _handle_flow_csv(lines: list[str]) -> None:
@@ -1106,6 +1211,7 @@ def _set_mode(name: str) -> None:
         dpg.configure_item(mode_button_tag(mode_name),
                            label=_mode_button_label(mode_name, mode_name == name))
     _apply_pane_heights()
+    _repaint_revealed()
 
 
 def _set_mode_by_key(key: str) -> None:
