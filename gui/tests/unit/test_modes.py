@@ -69,12 +69,53 @@ def test_every_pane_has_a_floor_and_a_row_weight():
         assert pane in modes.PANE_ROW_WEIGHT, f"{pane} has no PANE_ROW_WEIGHT"
 
 
-def test_trace_reads_history_then_registers_then_the_trace():
-    # Left to right is the order the operator works in: pick a run, read the
-    # registers for the step, follow the trace.
+def test_trace_reads_history_then_the_selected_step():
+    # Left to right is the order the operator works in: pick a run and a step in
+    # the tree, then read what that step captured.
     assert modes.MODES["trace"].panes["left"] == ("pane_flow_history",)
-    assert modes.MODES["trace"].panes["center"] == ("pane_flow_regs",)
-    assert modes.MODES["trace"].panes["right"] == ("pane_flow",)
+    assert modes.MODES["trace"].panes["center"] == ("pane_flow_regs", "pane_flow")
+    assert modes.MODES["trace"].panes["right"] == ("pane_flow_mem", "pane_flow_tls")
+
+
+def test_every_step_detail_pane_is_optional():
+    # SPEC_gui_v4 AC 4: the operator chooses which captured data is on screen.
+    assert modes.MODES["trace"].optional == frozenset(
+        {"pane_flow_regs", "pane_flow", "pane_flow_mem", "pane_flow_tls"})
+
+
+def test_optional_panes_belong_to_their_own_mode():
+    # An optional pane the mode never shows is a toggle that does nothing.
+    for name, mode in modes.MODES.items():
+        shown = {p for col in modes.COLUMNS for p in mode.panes[col]}
+        assert mode.optional <= shown, f"{name} makes unshown panes optional"
+
+
+def test_only_trace_swaps_the_control_row():
+    # SPEC_gui_v4 AC 3: run controls act on a live process, so the mode reading a
+    # finished run gets data toggles in that row instead.
+    assert modes.MODES["trace"].controls == "trace"
+    for name in modes.MODES:
+        if name != "trace":
+            assert modes.MODES[name].controls == "run"
+
+
+def test_row_weights_renormalise_over_survivors():
+    # Hiding TLS must give its pixels to Memory, not leave a gap.
+    full = modes.row_weights("trace", "right")
+    assert sum(full.values()) == pytest.approx(1.0)
+    survivors = modes.row_weights("trace", "right", hidden={"pane_flow_tls"})
+    assert set(survivors) == {"pane_flow_mem"}
+    assert survivors["pane_flow_mem"] == pytest.approx(1.0)
+
+
+def test_hiding_a_whole_column_leaves_no_panes():
+    hidden = modes.MODES["trace"].panes["right"]
+    assert modes.row_weights("trace", "right", hidden=hidden) == {}
+
+
+def test_visible_panes_drops_hidden_ones():
+    v = modes.visible_panes("trace", hidden={"pane_flow", "pane_flow_tls"})
+    assert v == ["pane_flow_history", "pane_flow_regs", "pane_flow_mem"]
 
 
 def test_watch_belongs_to_inspect_alone():

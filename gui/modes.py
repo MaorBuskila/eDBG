@@ -1,15 +1,19 @@
 """Mode registry for the v3 shell — pure data, no ``dearpygui`` import.
 
-A mode is ``{visible_panes, col_weights}``. Switching modes shows and hides
-existing panes and rewrites three column weights; it never creates, destroys,
-or re-parents a widget. Adding a mode is a ``MODES`` entry.
+A mode is ``{visible_panes, col_weights, optional, controls}``. Switching modes
+shows and hides existing panes and rewrites three column weights; it never
+creates, destroys, or re-parents a widget. Adding a mode is a ``MODES`` entry.
 
 Column fractions are measured, not chosen — see ``MIN_COL_FRAC``.
+
+A pane is on screen iff its mode lists it **and** its toggle is on, so every
+query taking a ``hidden`` set answers the second half of that expression. The
+toggle state itself belongs to the app; only the arithmetic lives here.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 COLUMNS = ("left", "center", "right")
 
@@ -23,6 +27,8 @@ PANES = (
     "pane_backtrace",
     "pane_flow_regs",
     "pane_flow",
+    "pane_flow_mem",
+    "pane_flow_tls",
     "pane_threads",
     "pane_tls",
     "pane_watch",
@@ -44,6 +50,10 @@ MIN_COL_FRAC = {
     # No symbol or deref column, so it needs less than the live register pane.
     "pane_flow_regs":   0.240,
     "pane_flow":        0.314,
+    # One probed address and its eight bytes — the narrowest pane in the shell.
+    "pane_flow_mem":    0.220,
+    # Same slot line as the live TLS pane, so the same floor.
+    "pane_flow_tls":    0.310,
     "pane_threads":     0.081,
     "pane_tls":         0.310,
     "pane_watch":       0.220,
@@ -55,11 +65,20 @@ MIN_COL_FRAC = {
 COLLAPSED = 0.0001
 
 
+#: Control rows the HUD prebuilds. A mode names one; both are never up at once.
+CONTROLS = ("run", "trace")
+
+
 @dataclass(frozen=True)
 class Mode:
     label: str
     panes: dict[str, tuple[str, ...]]
     weights: tuple[float, float, float]
+    #: Panes the operator can toggle off within this mode.
+    optional: frozenset = field(default_factory=frozenset)
+    #: Which prebuilt control row the HUD shows. Run controls act on a live
+    #: process, which a mode reading a finished run has nothing to do with.
+    controls: str = "run"
 
 
 _LOG_CENTER = 1.0 - 2 * COLLAPSED
@@ -78,10 +97,13 @@ MODES: dict[str, Mode] = {
         label="Trace",
         panes={
             "left":   ("pane_flow_history",),
-            "center": ("pane_flow_regs",),
-            "right":  ("pane_flow",),
+            "center": ("pane_flow_regs", "pane_flow"),
+            "right":  ("pane_flow_mem", "pane_flow_tls"),
         },
-        weights=(0.24, 0.28, 0.48),
+        weights=(0.26, 0.34, 0.40),
+        optional=frozenset({"pane_flow_regs", "pane_flow",
+                            "pane_flow_mem", "pane_flow_tls"}),
+        controls="trace",
     ),
     "inspect": Mode(
         label="Inspect",
@@ -116,8 +138,10 @@ PANE_ROW_WEIGHT = {
     "pane_disasm":      0.45,
     "pane_memory":      0.35,
     "pane_backtrace":   0.20,
-    "pane_flow_regs":   1.00,
-    "pane_flow":        1.00,
+    "pane_flow_regs":   0.60,
+    "pane_flow":        0.40,
+    "pane_flow_mem":    0.30,
+    "pane_flow_tls":    0.70,
     "pane_threads":     0.25,
     "pane_tls":         0.55,
     "pane_watch":       0.20,
@@ -145,14 +169,33 @@ def _derive_pane_column() -> dict[str, str]:
 PANE_COLUMN = _derive_pane_column()
 
 
+def _reject_unshown_optionals() -> None:
+    """A toggle for a pane the mode never shows is a control that does nothing."""
+    for name, mode in MODES.items():
+        shown = {p for col in COLUMNS for p in mode.panes[col]}
+        stray = mode.optional - shown
+        if stray:
+            raise ValueError(f"{name} makes unshown panes optional: {stray}")
+        if mode.controls not in CONTROLS:
+            raise ValueError(f"{name} wants unknown control row {mode.controls}")
+
+
+_reject_unshown_optionals()
+
+
 def panes_in_column(col: str) -> list[str]:
     """Every pane the shell builds into `col`, in build order."""
     return [p for p in PANES if PANE_COLUMN[p] == col]
 
 
-def row_weights(mode: str, col: str) -> dict[str, float]:
-    """Normalised height share per visible pane in `col`."""
-    visible = MODES[mode].panes[col]
+def row_weights(mode: str, col: str, hidden=()) -> dict[str, float]:
+    """Normalised height share per visible pane in `col`.
+
+    Renormalising over the survivors is what makes a toggled-off pane give its
+    pixels away instead of leaving a gap.
+    """
+    hidden = set(hidden)
+    visible = [p for p in MODES[mode].panes[col] if p not in hidden]
     total = sum(PANE_ROW_WEIGHT[p] for p in visible)
     if not total:
         return {}
@@ -163,10 +206,11 @@ def col_weights(mode: str) -> tuple[float, float, float]:
     return MODES[mode].weights
 
 
-def visible_panes(mode: str) -> list[str]:
-    """Panes shown in `mode`, ordered left column to right."""
+def visible_panes(mode: str, hidden=()) -> list[str]:
+    """Panes on screen in `mode`, ordered left column to right."""
+    hidden = set(hidden)
     m = MODES[mode]
-    return [p for col in COLUMNS for p in m.panes[col]]
+    return [p for col in COLUMNS for p in m.panes[col] if p not in hidden]
 
 
 def column_of(mode: str, pane: str) -> str | None:
