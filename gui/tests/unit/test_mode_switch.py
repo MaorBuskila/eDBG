@@ -33,7 +33,76 @@ def _shown() -> set[str]:
 @pytest.mark.parametrize("mode", list(modes.MODES))
 def test_mode_shows_exactly_its_panes(built_ctx, mode):
     app._set_mode(mode)
-    assert _shown() == set(modes.visible_panes(mode))
+    assert _shown() == set(modes.visible_panes(mode, app._hidden_panes(mode)))
+
+
+# ── v4: the control row belongs to the mode ──────────────────────────
+
+def _control_rows_shown() -> set[str]:
+    return {row for row in modes.CONTROLS
+            if dpg.get_item_configuration(app.control_row_tag(row))["show"]}
+
+
+@pytest.mark.parametrize("mode", list(modes.MODES))
+def test_exactly_one_control_row_is_up(built_ctx, mode):
+    app._set_mode(mode)
+    assert _control_rows_shown() == {modes.MODES[mode].controls}
+
+
+def test_trace_offers_no_button_that_acts_on_a_live_process(built_ctx):
+    app._set_mode("trace")
+    for tag in ("btn_continue", "btn_interrupt", "btn_step", "btn_next",
+                "btn_finish", "btn_until"):
+        assert dpg.get_item_configuration(
+            app.control_row_tag("run"))["show"] is False, \
+            f"{tag} is reachable while reading a finished run"
+
+
+# ── v4: toggles compose with the mode ────────────────────────────────
+
+def test_a_toggled_off_pane_leaves_the_screen(built_ctx):
+    app._set_mode("trace")
+    app._cb_pane_toggle(None, False, "pane_flow_tls")
+    assert "pane_flow_tls" not in _shown()
+    app._cb_pane_toggle(None, True, "pane_flow_tls")
+    assert "pane_flow_tls" in _shown()
+
+
+def test_a_toggled_off_pane_gives_its_pixels_away(built_ctx):
+    app._set_mode("trace")
+    before = app._pane_heights(900, "trace")["pane_flow_mem"]
+    after = app._pane_heights(900, "trace", {"pane_flow_tls"})["pane_flow_mem"]
+    assert after > before
+
+
+def test_revealing_a_pane_repaints_it_with_the_current_selection(built_ctx):
+    # The v3 reveal contract, applied to toggles: a pane hidden across N
+    # selections must not come back showing the selection it left on.
+    app._set_mode("trace")
+    app._cb_pane_toggle(None, False, "pane_flow_tls")
+    app._dirty.clear()
+    app._cb_pane_toggle(None, True, "pane_flow_tls")
+    assert "pane_flow_tls" not in app._dirty.pending(), \
+        "the reveal must paint, not just mark"
+
+
+def test_only_an_optional_pane_can_be_turned_off(built_ctx):
+    app._set_mode("trace")
+    app._cb_pane_toggle(None, False, "pane_flow_history")
+    assert "pane_flow_history" in _shown()
+
+
+def test_a_toggle_in_one_mode_does_not_hide_a_pane_in_another(built_ctx):
+    app._set_mode("trace")
+    app._cb_pane_toggle(None, False, "pane_flow_regs")
+    app._set_mode("step")
+    assert _shown() == set(modes.visible_panes("step"))
+
+
+def test_every_optional_pane_has_a_checkbox(built_ctx):
+    for pane in modes.MODES["trace"].optional:
+        assert dpg.does_item_exist(app.pane_toggle_tag(pane)), \
+            f"{pane} can be hidden but not un-hidden"
 
 
 @pytest.mark.parametrize("mode", list(modes.MODES))

@@ -117,6 +117,15 @@ def mode_button_tag(mode: str) -> str:
 def text_toggle_tag(pane: str) -> str:
     return f"txtmode_{pane}"
 
+
+def control_row_tag(row: str) -> str:
+    """The HUD row a mode asks for. Exactly one is ever up."""
+    return f"controls_{row}"
+
+
+def pane_toggle_tag(pane: str) -> str:
+    return f"panetoggle_{pane}"
+
 # ── Mono font tag ────────────────────────────────────────────────────
 _MONO_FONT = "font_mono"
 
@@ -1324,6 +1333,23 @@ _CHROME_H = 150        # px of HUD + mode bar + command bar above/below the shel
 
 _active_mode: str = modes.DEFAULT_MODE
 
+#: Checkbox per optional pane, in the order they read on the row.
+_PANE_TOGGLE_LABEL = {
+    "pane_flow_regs": "Registers",
+    "pane_flow_mem":  "Memory",
+    "pane_flow_tls":  "TLS",
+    "pane_flow":      "Trace rows",
+}
+
+#: Optional panes the operator has turned off. Trace rows start off: the tree
+#: already lists the same steps, so the pane earns its place by being asked for.
+_pane_off: set = {"pane_flow"}
+
+
+def _hidden_panes(mode: str) -> set:
+    """Panes off in `mode`. Only a pane the mode calls optional can be off."""
+    return _pane_off & modes.MODES[mode].optional
+
 
 def current_mode() -> str:
     return _active_mode
@@ -1379,7 +1405,9 @@ def _build_hud() -> None:
         dpg.add_button(label="Disconnect", tag=TAG["btn_disconnect"],
                        callback=_cb_disconnect, enabled=False)
 
-    with dpg.group(horizontal=True):
+    # Both rows are built once and swapped by show/hide, the same trick the
+    # pane pool uses. Which one a mode wants is in the registry, not here.
+    with dpg.group(horizontal=True, tag=control_row_tag("run")):
         dpg.add_button(label=" Continue (F5) ", tag=TAG["btn_continue"],
                        callback=_cb_continue, enabled=False)
         dpg.add_button(label=" Interrupt ", tag=TAG["btn_interrupt"],
@@ -1393,6 +1421,13 @@ def _build_hud() -> None:
                        callback=_cb_finish, enabled=False)
         dpg.add_button(label=" Until ", tag=TAG["btn_until"],
                        callback=_cb_until, enabled=False)
+
+    with dpg.group(horizontal=True, tag=control_row_tag("trace"), show=False):
+        _hdr("SHOW")
+        for pane, label in _PANE_TOGGLE_LABEL.items():
+            dpg.add_checkbox(label=label, tag=pane_toggle_tag(pane),
+                             default_value=pane not in _pane_off,
+                             user_data=pane, callback=_cb_pane_toggle)
 
 
 def _mode_button_label(name: str, active: bool) -> str:
@@ -1624,15 +1659,17 @@ _PANE_CHROME = {
 }
 
 
-def _pane_heights(avail: int, mode: str) -> dict[str, int]:
+def _pane_heights(avail: int, mode: str, hidden=()) -> dict[str, int]:
     """Pixel height per visible pane. Pure arithmetic, so it is testable.
 
     Each column's chrome is subtracted before the remainder is shared out, so
-    the panes plus their headers and controls fit the column exactly.
+    the panes plus their headers and controls fit the column exactly. A pane
+    toggled off is not in `shares` at all, which is how its pixels reach its
+    neighbours instead of leaving a gap.
     """
     out: dict[str, int] = {}
     for col in modes.COLUMNS:
-        shares = modes.row_weights(mode, col)
+        shares = modes.row_weights(mode, col, hidden)
         chrome = sum(_PANE_CHROME[p] for p in shares)
         body = max(60 * len(shares), avail - chrome)
         for pane, share in shares.items():
@@ -1650,7 +1687,8 @@ def _apply_pane_heights() -> None:
     if not dpg.is_viewport_ok():
         return          # headless build: heights land on the first real frame
     avail = max(200, dpg.get_viewport_client_height() - _CHROME_H)
-    for pane, height in _pane_heights(avail, _active_mode).items():
+    heights = _pane_heights(avail, _active_mode, _hidden_panes(_active_mode))
+    for pane, height in heights.items():
         dpg.configure_item(TAG[pane], height=height)
 
 
@@ -1662,14 +1700,39 @@ def _set_mode(name: str) -> None:
     """
     global _active_mode
     _active_mode = name
-    visible = set(modes.visible_panes(name))
-    for pane in modes.PANES:
-        dpg.configure_item(section_tag(pane), show=pane in visible)
+    _apply_pane_visibility()
     for col, weight in zip(modes.COLUMNS, modes.col_weights(name)):
         dpg.configure_item(column_tag(col), init_width_or_weight=weight)
+    for row in modes.CONTROLS:
+        dpg.configure_item(control_row_tag(row),
+                           show=row == modes.MODES[name].controls)
     for mode_name in modes.MODES:
         dpg.configure_item(mode_button_tag(mode_name),
                            label=_mode_button_label(mode_name, mode_name == name))
+    _apply_pane_heights()
+    _repaint_revealed()
+
+
+def _apply_pane_visibility() -> None:
+    """A pane is on screen iff its mode lists it and its toggle is on."""
+    visible = set(modes.visible_panes(_active_mode, _hidden_panes(_active_mode)))
+    for pane in modes.PANES:
+        dpg.configure_item(section_tag(pane), show=pane in visible)
+
+
+@_safe
+def _cb_pane_toggle(sender, app_data, user_data):
+    pane = user_data
+    if pane not in modes.MODES[_active_mode].optional:
+        return
+    if app_data:
+        _pane_off.discard(pane)
+    else:
+        _pane_off.add(pane)
+    # A pane hidden across N selections must come back showing the current one,
+    # so the reveal paints rather than waiting for the next selection to mark it.
+    _dirty.mark(pane)
+    _apply_pane_visibility()
     _apply_pane_heights()
     _repaint_revealed()
 
