@@ -51,7 +51,7 @@ T4 Go metadata row ─┘
 
 ### Phase 1: Pure foundations (headless, no `dearpygui`, no device)
 
-- [ ] **Task 1: Mode registry grows optional panes and a control row.**
+- [x] **Task 1: Mode registry grows optional panes and a control row.** DONE.
   Add `pane_flow_mem` and `pane_flow_tls` to `PANES`, `MIN_COL_FRAC`, and
   `PANE_ROW_WEIGHT`. Give `Mode` two fields: `optional: frozenset[str]` and
   `controls: str` (`"run"` | `"trace"`). Rewrite the `trace` entry to
@@ -67,7 +67,7 @@ T4 Go metadata row ─┘
   - Files: `gui/modes.py`, `gui/tests/unit/test_modes.py`.
   - Deps: None. Scope: S.
 
-- [ ] **Task 2: Flow reader learns metadata, memory, and the TLS sidecar.**
+- [x] **Task 2: Flow reader learns metadata, memory, and the TLS sidecar.** DONE.
   `parse_flow_csv` skips a leading `#` row and reads `symbol=` from it into
   `FlowRun.symbol`. New `parse_flow_tls_csv(path)` returns
   `{step: [FlowTlsSlot(slot, addr, value, cls, annot)]}`; `parse_flow_csv` picks
@@ -86,32 +86,40 @@ T4 Go metadata row ─┘
   - Deps: None. Scope: S.
 
 ### Checkpoint: Foundations
-- [ ] `pytest gui/tests/unit` green.
-- [ ] `gui.modes` and `gui.flowtrace` both import with `dearpygui` uninstalled.
-- [ ] No GUI behaviour has changed yet — the app still runs exactly as before.
+- [x] `pytest gui/tests` green (404 passed).
+- [x] `gui.modes` and `gui.flowtrace` both import with `dearpygui` uninstalled.
+- [x] No GUI behaviour has changed yet — the two new panes are empty shells so
+      the pane pool still builds.
 
 ### Phase 2: Capture side (Go)
 
-- [ ] **Task 3: `flow --tls[=N]` writes a per-step TLS sidecar.**
-  Parse `--tls` (bare = 32 slots) in `HandleFlow`. At flow entry take one maps
-  snapshot plus the thread's stack_and_tls range. Per step, read `N*8` bytes from
-  SP, classify each slot against the snapshot, and write
-  `step,slot,addr,value,class,annot` to `<lib>_0x<rva>_flow_tls.csv`. Annotations
-  come from a `map[uint64]string` memo so a repeated pointer is annotated once.
-  Print the sidecar path on completion alongside the CSV path.
+- [x] **Task 3: `flow --tls [N]` writes a per-step TLS sidecar.** DONE.
+  Parse `--tls` (bare = 32 slots, space-separated value like the existing
+  `--over`, not `--tls=N`) in `HandleFlow`. At flow entry take one maps snapshot
+  plus the thread's stack_and_tls range. Per step, read `N*8` bytes from SP,
+  classify each slot against the snapshot, and write
+  `step,slot,addr,value,class,annot` to `<lib>_0x<rva>_flow_tls.csv`. Class and
+  annotation come from `utils.MemoResolver` so a repeated pointer is resolved
+  once. Print the sidecar path on completion alongside the CSV path.
   - AC: `flow 0x1000` without `--tls` writes no sidecar and is byte-identical to
     today's output.
-  - AC: a slot read that fails writes the row with `class=junk,annot=` rather
-    than aborting the run — a trace that dies at step 900 of 1000 is worse than
-    one lossy row.
-  - AC: `N` is clamped to `[1, 256]`; `--tls=0` is rejected with the usage line.
-  - AC: the row-building helper is a pure function over
-    `(step, base, buf, snapshot)` and is unit-tested without a device.
-  - Verify: `go build ./...`, `go test ./utils/... ./cli/...`.
-  - Files: `cli/repl.go`, `utils/tls_parse.go`, `cli/repl_flow_tls_test.go`.
+  - AC: a slot read that fails costs that step its slots and nothing more.
+    **Amended from the first draft**, which had it write a fabricated
+    `class=junk` row: inventing data to satisfy a row count is worse than a gap
+    the reader can see. The run continues either way, which was the point.
+  - AC: `N` is clamped to `[1, 256]`; `--tls 0` is rejected with the usage line.
+  - AC: the row-building helper is pure over `(step, base, buf, resolve)` and is
+    unit-tested off the hot path.
+  - Verify: `make build`. The Go unit tests need cgo and Linux syscalls, so they
+    cross-compile and run on the device:
+    `GOOS=android GOARCH=arm64 CGO_ENABLED=1 CC=<ndk>/aarch64-linux-android29-clang go test -c -vet=off -o /tmp/x.test ./utils/`
+    then `adb push` and run. **Nothing runs them on the Mac** — which is how
+    `TestTlsClipDumpRange` came to be failing before this change touched it.
+  - Files: `cli/repl.go`, `utils/flow_tls.go`, `utils/flow_tls_test.go`,
+    `cli/repl_flow_test.go`.
   - Deps: None. Scope: M.
 
-- [ ] **Task 4: `flow` writes the run metadata row.**
+- [x] **Task 4: `flow` writes the run metadata row.** DONE.
   Before the column header, write one row `# lib=<lib>,rva=0x<rva>,symbol=<sym>`
   using `Process.GetSymbol(absolute)`. Empty `symbol=` when unresolved.
   - AC: the row is the first line and the column header still follows it.
@@ -122,7 +130,8 @@ T4 Go metadata row ─┘
   - Deps: None (pairs with Task 2's reader). Scope: XS.
 
 ### Checkpoint: Capture
-- [ ] `go build ./...` and `go vet ./...` clean.
+- [x] `make build` clean. (`go build ./...` on the Mac cannot work: the tree
+      needs cgo and an NDK, so the host has no way to compile `utils.ParseStack`.)
 - [ ] On a device: `flow <rva> --regs --mem X0 --tls` produces both CSVs; the
       main CSV opens in the *current* GUI unchanged (backward compatibility).
 - [ ] Timing recorded for the same run with and without `--tls` — the assumption
