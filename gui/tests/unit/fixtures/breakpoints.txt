@@ -1,0 +1,4 @@
+[+] 0: libfoo.so+1234
+[+] 1: libbar.so+5678
+[-] 2: libfoo.so+abcd
+[+] 3: deadbeef Hardware

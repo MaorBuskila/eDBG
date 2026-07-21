@@ -1,0 +1,4 @@
+>>  0x7b80e12340<libfoo.so+0x1234>	MOV X0, X1
+    0x7b80e12344<libfoo.so+0x1238>	BL #0x7b80e20000
+    0x7b80e12348<libfoo.so+0x123c>	LDR X2, [SP, #0x10]
+    0x7b80e1234c	NOP

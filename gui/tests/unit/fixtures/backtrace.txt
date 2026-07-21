@@ -1,0 +1,4 @@
+Backtrace (most recent call first):
+#0  0x00000079ABCDEF00 in libfoo.so + 0x1234
+#1  0x00000079ABCDEF04 in ?? ()
+#2  0x00000079ABCDEF08 in libbar.so + 0x5678

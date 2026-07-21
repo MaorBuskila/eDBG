@@ -1,0 +1,5 @@
+EDBG{"t":"hello","seq":0,"ts_ns":1690000000000,"schema":1,"edbg_version":"dev","pkg":"com.shlomi.RollABall2019","lib":"libloader.so","edbg_pid":30695}
+EDBG{"t":"breakpoints","seq":10,"ts_ns":1,"bps":[{"id":0,"on":true,"type":"software","lib":"libloader.so","off":"0x12a40c"}]}
+EDBG{"t":"threads","seq":11,"ts_ns":2,"threads":[{"i":0,"tid":12350,"name":"main","cur":true}]}
+EDBG{"t":"memory","seq":12,"ts_ns":3,"addr":"0x7be3f90000","hex":"48656c6c6f20576f726c642100000000","src":"examine"}
+EDBG{"t":"error","seq":13,"ts_ns":4,"msg":"ReadMemory failed: no such process","cmd":"x 0x0 64"}

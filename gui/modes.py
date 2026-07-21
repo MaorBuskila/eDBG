@@ -102,6 +102,55 @@ MODE_KEYS = {"step": "F1", "trace": "F2", "inspect": "F3", "log": "F4"}
 
 DEFAULT_MODE = "step"
 
+#: Share of its column's height a pane takes, normalised across the panes
+#: actually visible in the current mode.
+PANE_ROW_WEIGHT = {
+    "pane_regs":        0.72,
+    "pane_breakpoints": 0.28,
+    "pane_disasm":      0.45,
+    "pane_memory":      0.35,
+    "pane_backtrace":   0.20,
+    "pane_flow":        1.00,
+    "pane_threads":     0.25,
+    "pane_tls":         0.55,
+    "pane_watch":       0.20,
+    "pane_log":         1.00,
+}
+
+
+def _derive_pane_column() -> dict[str, str]:
+    """Map each pane to its one column, rejecting panes that move between modes.
+
+    A pane that changed column across modes could not be a single widget
+    instance — it would have to be re-parented on every switch, which is the
+    design this shell exists to avoid.
+    """
+    out: dict[str, str] = {}
+    for name, mode in MODES.items():
+        for col in COLUMNS:
+            for pane in mode.panes[col]:
+                if out.setdefault(pane, col) != col:
+                    raise ValueError(
+                        f"{pane} is in {out[pane]} but {name} puts it in {col}")
+    return out
+
+
+PANE_COLUMN = _derive_pane_column()
+
+
+def panes_in_column(col: str) -> list[str]:
+    """Every pane the shell builds into `col`, in build order."""
+    return [p for p in PANES if PANE_COLUMN[p] == col]
+
+
+def row_weights(mode: str, col: str) -> dict[str, float]:
+    """Normalised height share per visible pane in `col`."""
+    visible = MODES[mode].panes[col]
+    total = sum(PANE_ROW_WEIGHT[p] for p in visible)
+    if not total:
+        return {}
+    return {p: PANE_ROW_WEIGHT[p] / total for p in visible}
+
 
 def col_weights(mode: str) -> tuple[float, float, float]:
     return MODES[mode].weights
