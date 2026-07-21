@@ -1159,6 +1159,13 @@ func (this *Client) HandleFlow(args []string) {
 	}
 	writer := csv.NewWriter(csvFile)
 
+	// One metadata row before the header. A run knows its own RVA, but the
+	// operator picking it out of history is picking by name. symbol= is last so
+	// a reader can take it to end of field — a demangled name carries the very
+	// commas and equals signs a split on delimiters would trip over.
+	writer.Write([]string{fmt.Sprintf("# lib=%s,rva=0x%x,symbol=%s",
+		libName, rva, plainSymbol(this.Process.GetSymbol(absolute)))})
+
 	header := []string{"step", "va", "rva"}
 	if showRegs {
 		for i := 0; i < 30; i++ {
