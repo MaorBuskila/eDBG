@@ -86,6 +86,18 @@ def test_revealing_a_pane_repaints_it_with_the_current_selection(built_ctx):
         "the reveal must paint, not just mark"
 
 
+def test_a_toggled_off_pane_does_not_repaint(built_ctx):
+    # A toggle that only hides the pixels still pays for the pane on every
+    # selection, which is the cost the toggle exists to remove.
+    app._set_mode("trace")
+    app._cb_pane_toggle(None, False, "pane_flow_tls")
+    app._dirty.mark("pane_flow_tls")
+    app._populate_flow_tls()
+    assert "pane_flow_tls" in app._dirty.pending(), \
+        "a hidden pane painted, and lost the flag its reveal needs"
+    app._cb_pane_toggle(None, True, "pane_flow_tls")
+
+
 def test_only_an_optional_pane_can_be_turned_off(built_ctx):
     app._set_mode("trace")
     app._cb_pane_toggle(None, False, "pane_flow_history")

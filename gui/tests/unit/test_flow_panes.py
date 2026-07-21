@@ -42,8 +42,14 @@ def built_ctx():
     app._flow_selected = None
     app._flow_step = 0
     app._dirty.clear()
+    # This file tests what the panes render, so every one of them is on. Which
+    # of them are off by default is a mode-switch concern, tested there.
+    off = set(app._pane_off)
+    app._pane_off.clear()
     app._set_mode("trace")
     yield
+    app._pane_off.clear()
+    app._pane_off.update(off)
     app._flow_runs = []
     app._flow_selected = None
     app._dirty.clear()

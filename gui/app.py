@@ -242,7 +242,12 @@ _dirty = DirtySet()
 
 
 def _pane_visible(pane: str) -> bool:
-    return pane in modes.MODES[_active_mode].panes[modes.PANE_COLUMN[pane]]
+    """On screen iff the mode lists it and its toggle is on.
+
+    A toggle that hid only the pixels would still pay for the pane on every
+    selection, which is the cost it exists to remove.
+    """
+    return pane in modes.visible_panes(_active_mode, _hidden_panes(_active_mode))
 
 
 def _take_paint(pane: str) -> bool:
@@ -267,7 +272,7 @@ def _take_paint(pane: str) -> bool:
 
 def _repaint_revealed() -> None:
     """Paint panes that became visible while carrying an unpainted change."""
-    for pane in modes.visible_panes(_active_mode):
+    for pane in modes.visible_panes(_active_mode, _hidden_panes(_active_mode)):
         if pane in _dirty.pending():
             _PANE_PAINTERS[pane]()
 
