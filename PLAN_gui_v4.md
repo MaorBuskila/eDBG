@@ -139,7 +139,7 @@ T4 Go metadata row ─┘
 
 ### Phase 3: Trace mode (GUI)
 
-- [ ] **Task 5: FLOW HISTORY becomes a run/step tree.**
+- [x] **Task 5: FLOW HISTORY becomes a run/step tree.**
   `_populate_flow_history` renders one `dpg.tree_node` per run
   (`<lib>+0x<rva>  <symbol>  N steps  HH:MM:SS`, selected run default-open) with
   windowed step children. Root click selects run + step 0; child click selects
@@ -154,7 +154,7 @@ T4 Go metadata row ─┘
   - Files: `gui/app.py`, `gui/tests/unit/test_flow_panes.py`.
   - Deps: 1, 2. Scope: M.
 
-- [ ] **Task 6: Step detail panes.**
+- [x] **Task 6: Step detail panes.**
   Delete the live-register fallback from `_populate_flow_regs` and
   `_flow_regs_to_text`. Build `pane_flow_mem` (probe address and value for the
   step, "(run captured without --mem)" otherwise) and `pane_flow_tls` (slots
@@ -173,7 +173,7 @@ T4 Go metadata row ─┘
     `gui/tests/unit/test_command_contract.py`.
   - Deps: 1, 2. Scope: M.
 
-- [ ] **Task 7: Control-row swap and data toggles.**
+- [x] **Task 7: Control-row swap and data toggles.**
   `_build_hud` builds the run-control group and a trace-toggle group as siblings.
   `_set_mode` shows the group named by `MODES[name].controls` and applies
   `mode ∧ toggle` visibility plus `row_weights(..., hidden=…)` heights. A toggle
@@ -187,7 +187,7 @@ T4 Go metadata row ─┘
     `gui/tests/unit/test_layout.py`.
   - Deps: 1, 5, 6. Scope: M.
 
-- [ ] **Task 8: Launch and pull the TLS sidecar.**
+- [x] **Task 8: Launch and pull the TLS sidecar.**
   Add a `TLS` checkbox plus slot-count box to the launch controls; `_cb_flow`
   appends `--tls=<n>`. `_handle_flow_csv` pulls `<stem>_flow_tls.csv` alongside
   the main CSV, tolerating its absence.
@@ -200,8 +200,13 @@ T4 Go metadata row ─┘
   - Deps: 3, 6. Scope: S.
 
 ### Checkpoint: Complete
-- [ ] Full `pytest gui/tests` green; `go build ./...` clean.
-- [ ] SPEC_gui_v4 AC 1–7 each demonstrated.
+- [x] Full `pytest gui/tests` green (442 passed); `make build` clean; the GUI
+      launches and runs.
+- [x] SPEC_gui_v4 AC 1–7 each demonstrated by a test, except the device-only
+      halves of AC 5 (see the two unchecked device items above).
+- [x] One defect found and fixed after Task 7: `_pane_visible` ignored the
+      toggles, so a pane turned off still repainted on every selection and ate
+      its own dirty flag while invisible.
 - [ ] On a device: run `flow --regs --mem X0 --tls`, browse the tree, toggle each
       pane, confirm no pane in Trace ever shows live state.
 - [ ] `adb shell ps -A | grep '[e]DBG'` empty after quit (v2 AC 7b, unregressed).

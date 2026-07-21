@@ -68,8 +68,11 @@ Inherits `SPEC_gui_v3.md` §"Core Acceptance Criteria" 1–7. Adds:
    - AC: grep proves no `_session.last_` reference on any `_populate_flow_*` path.
 
 2. **Runs are folders, steps are files.** One tree owns both selections.
-   - AC: selecting a run root selects the run and step 0; selecting a step child
-     selects only the step.
+   - AC: an unselected run opens at step 0 from one row under its node;
+     selecting a step child selects that run and that step together.
+     **Amended during build**: DPG's `tree_node` takes no callback, so the root
+     itself cannot be clicked to select. The opener row is also what keeps an
+     unselected long run from costing the frame every one of its steps.
    - AC: a 10 000-step run renders `_FLOW_MAX_ROWS` children, not 10 000 — the
      window is centred on the selected step and states what it clipped.
 
@@ -86,14 +89,16 @@ Inherits `SPEC_gui_v3.md` §"Core Acceptance Criteria" 1–7. Adds:
    - AC: toggling a pane off then on repaints it with the *current* selection,
      never stale rows (the v3 reveal contract, applied to toggles).
 
-5. **A step's TLS is captured, not reconstructed.** `flow --tls[=N]` writes the
+5. **A step's TLS is captured, not reconstructed.** `flow --tls [N]` writes the
    per-step stack_and_tls slots to a sidecar CSV next to the run's CSV.
    - AC: the sidecar is `<lib>_0x<rva>_flow_tls.csv` with columns
      `step,slot,addr,value,class,annot`; `glob("*_flow.csv")` does not match it.
    - AC: a run pulled without the sidecar loads exactly as before — the TLS pane
      says the run was captured without `--tls`.
    - AC: classification uses one maps snapshot taken at flow entry, and each
-     distinct slot value is annotated at most once per run.
+     distinct slot value is classified and annotated at most once per run.
+   - AC: a slot read that fails costs that step its slots and nothing more; the
+     run continues.
 
 6. **Every captured value is clickable.** Register values, the memory probe
    address and value, and TLS slot values copy to the clipboard on click; an
