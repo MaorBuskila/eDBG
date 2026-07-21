@@ -36,6 +36,7 @@ type UserConfig struct {
 	HitOnly       bool
 	ScriptFile    string
 	FlowMode      bool
+	PipeMode      bool
 	ThreadFilters []*ThreadFilter
 	Display       []*DisplayInfo
 }
@@ -90,7 +91,7 @@ func (this *Client) Run() {
 	go func() {
 		for {
 			<-this.Incoming
-			this.OutputInfo()
+			this.HitOnlyOutput()
 			if config.FlowTracing {
 				select {
 				case this.FlowStepDone <- true:
@@ -100,7 +101,9 @@ func (this *Client) Run() {
 		}
 	}()
 	go func() {
-		if !this.IsMCPMode() && !this.Config.FlowMode {
+		if this.Config.PipeMode {
+			this.PipeREPL()
+		} else if !this.IsMCPMode() && !this.Config.FlowMode {
 			this.REPL()
 		}
 	}()
@@ -295,6 +298,16 @@ func (this *Client) REPL() {
 	this.promptInstance.Run()
 }
 
+// PipeREPL reads commands from stdin line-by-line — no TTY required.
+// Used by the GUI which drives eDBG through subprocess pipes.
+func (this *Client) PipeREPL() {
+	this.PrintConfig()
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		this.executeCommand(scanner.Text())
+	}
+}
+
 func (this *Client) executeCommand(line string) {
 	line = strings.TrimSpace(line)
 	if line == "" {
@@ -369,6 +382,8 @@ func (this *Client) executeCommand(line string) {
 	// 	fmt.Println("eDBG DO NOT execute programs. Please run it manually.")
 	case "flow":
 		this.HandleFlow(args)
+	case "tls":
+		this.HandleTls(args)
 	case "set":
 		this.HandleSet(args)
 	case "write", "w":
@@ -413,6 +428,7 @@ func (this *Client) completer(d prompt.Document) []prompt.Suggest {
 		{Text: "backtrace1", Description: "Show the current stack frame (call stack) [bt1]"},
 		{Text: "backtrace", Description: "Show the current stack frame (call stack) [bt]"},
 		{Text: "flow", Description: "Trace execution flow from RVA until return"},
+		{Text: "tls", Description: "Dump/classify stack_and_tls slots for stopped TID"},
 	}
 	return prompt.FilterHasPrefix(s, d.GetWordBeforeCursor(), true)
 }
@@ -581,6 +597,96 @@ func (this *Client) HandleBacktraceByUnwind(args []string) {
 	// }
 	fmt.Println("Backtrace (most recent call first):")
 	fmt.Println(stackTraceString)
+}
+
+func (this *Client) HandleTls(args []string) {
+	if this.Process.WorkPid == 0 {
+		fmt.Println("Not stopped on a thread.")
+		return
+	}
+	if len(args) > 1 {
+		fmt.Println("Usage: tls [reg|addr]")
+		return
+	}
+
+	pid := this.Process.WorkPid
+	tid := this.Process.WorkTid
+	this.Process.MapsUpToDate[pid] = false
+	maps, err := this.Process.GetCurrentMaps()
+	if err != nil {
+		fmt.Printf("Failed to read maps: %v\n", err)
+		return
+	}
+
+	stackStart, stackEnd, mapName, err := maps.FindStackAndTls(tid)
+	if err != nil {
+		fmt.Printf("%v\n", err)
+		return
+	}
+
+	var base uint64
+	if len(args) == 0 {
+		base = this.Process.Context.SP
+	} else {
+		base, err = utils.GetExprValue(args[0], this.Process.Context)
+		if err != nil {
+			fmt.Printf("Failed to parse address: %v\n", err)
+			return
+		}
+	}
+
+	if base < stackStart || base >= stackEnd {
+		fmt.Printf("base 0x%x outside %s 0x%x-0x%x\n", base, mapName, stackStart, stackEnd)
+		return
+	}
+
+	dumpStart, dumpLen := utils.ClipDumpRange(base, stackEnd, utils.TlsDumpLen)
+	if dumpLen == 0 {
+		fmt.Println("Nothing to dump.")
+		return
+	}
+
+	buf := make([]byte, dumpLen)
+	n, err := utils.ReadProcessMemory(pid, uintptr(dumpStart), buf)
+	if err != nil {
+		fmt.Printf("Failed to read stack memory at 0x%x: %v\n", dumpStart, err)
+		return
+	}
+	if uint64(n) < dumpLen {
+		fmt.Printf("Partial read at 0x%x (%d of %d bytes)\n", dumpStart, n, dumpLen)
+		dumpLen = uint64(n)
+		buf = buf[:n]
+	}
+
+	regions := maps.Regions()
+	looksLikeString := func(addr uint64) bool {
+		return utils.LooksLikeCString(pid, addr)
+	}
+
+	fmt.Printf("tls tid=%d map=%s 0x%x-0x%x\n", tid, mapName, stackStart, stackEnd)
+	fmt.Printf("base=0x%x  len=0x%x\n", base, dumpLen)
+
+	for off := uint64(0); off+8 <= dumpLen; off += 8 {
+		slotAddr := dumpStart + off
+		value := binary.LittleEndian.Uint64(buf[off : off+8])
+		class := utils.Classify(value, regions, stackStart, stackEnd, looksLikeString)
+		delta := slotAddr - base
+		rel := fmt.Sprintf("+0x%x (#%d)", delta, delta)
+		annot := ""
+		switch class {
+		case utils.TlsClassCode:
+			annot = this.Process.GetSymbol(value)
+		case utils.TlsClassString, utils.TlsClassHeap, utils.TlsClassStack, utils.TlsClassMapped:
+			annot = utils.PeekPtrAnnotate(pid, value)
+		case utils.TlsClassJunk:
+			annot = utils.FormatLEAscii(value)
+		}
+		if annot != "" {
+			fmt.Printf("0x%x  0x%x  %s  %s  %s\n", slotAddr, value, class, rel, annot)
+		} else {
+			fmt.Printf("0x%x  0x%x  %s  %s\n", slotAddr, value, class, rel)
+		}
+	}
 }
 
 func (this *Client) HandleThread(args []string) {
@@ -938,16 +1044,21 @@ func (this *Client) HandleUntil(args []string) bool {
 
 func (this *Client) HandleFlow(args []string) {
 	if len(args) == 0 {
-		fmt.Println("Usage: flow <rva> [--over] [--max N] [--regs] [--mem <reg>] [--quiet]")
-		fmt.Println("  CLI: eDBG -p <pkg> -l <lib> -flow <rva> [-v]")
+		fmt.Println("Usage: flow <rva> [--over [1|2|3]] [--max N] [--regs] [--mem <reg>] [--tls [N]] [--quiet]")
+		fmt.Println("  --over 1  step over BL/BLR (default if bare --over)")
+		fmt.Println("  --over 2  step over all branches except RET")
+		fmt.Println("  --over 3  follow only transfers that stay in current lib")
+		fmt.Printf("  --tls N   dump N stack_and_tls slots per step to a sidecar CSV (default %d, max %d)\n", flowTlsDefaultSlots, flowTlsMaxSlots)
+		fmt.Println("  CLI: eDBG -p <pkg> -l <lib> -flow -flow-over[=N] [-v]")
 		return
 	}
 
 	quiet := false
-	stepOver := false
+	overLevel := 0
 	showRegs := false
 	memReg := ""
 	maxSteps := 10000
+	tlsSlots := 0
 
 	rvaStr := args[0]
 	for i := 1; i < len(args); i++ {
@@ -955,9 +1066,29 @@ func (this *Client) HandleFlow(args []string) {
 		case "--quiet":
 			quiet = true
 		case "--over":
-			stepOver = true
+			overLevel = 1
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+				v, err := strconv.Atoi(args[i])
+				if err != nil || v < 1 || v > 3 {
+					fmt.Println("--over requires level 1, 2, or 3")
+					return
+				}
+				overLevel = v
+			}
 		case "--regs":
 			showRegs = true
+		case "--tls":
+			tlsSlots = flowTlsDefaultSlots
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				i++
+				v, err := strconv.Atoi(args[i])
+				if err != nil || v < 1 || v > flowTlsMaxSlots {
+					fmt.Printf("--tls requires a slot count between 1 and %d\n", flowTlsMaxSlots)
+					return
+				}
+				tlsSlots = v
+			}
 		case "--mem":
 			if i+1 < len(args) {
 				i++
@@ -1007,7 +1138,7 @@ func (this *Client) HandleFlow(args []string) {
 	}
 	address.Absolute = absolute
 
-	config.Debugf("flow: rva=0x%x fileOffset=0x%x abs=0x%x max=%d stepOver=%v memReg=%s", rva, fileOffset, absolute, maxSteps, stepOver, memReg)
+	config.Debugf("flow: rva=0x%x fileOffset=0x%x abs=0x%x max=%d overLevel=%d memReg=%s", rva, fileOffset, absolute, maxSteps, overLevel, memReg)
 
 	tid := this.Process.WorkTid
 	if tid == 0 {
@@ -1040,7 +1171,7 @@ func (this *Client) HandleFlow(args []string) {
 	}
 	writer.Write(header)
 
-	fmt.Printf("Flow trace: 0x%x → %s, max %d steps, output: %s\n", rva, csvPath, maxSteps, csvPath)
+	fmt.Printf("Flow trace: 0x%x → %s, max %d steps, over=%d, output: %s\n", rva, csvPath, maxSteps, overLevel, csvPath)
 
 	config.FlowTracing = true
 	this.BrkManager.FlowEntryAbs = absolute
@@ -1067,6 +1198,14 @@ func (this *Client) HandleFlow(args []string) {
 	}
 
 	<-this.FlowStepDone
+
+	// The snapshot has to wait for the first stop: only then is there a thread
+	// with a stack to find. It is taken once because a flow traces one
+	// function, and re-reading maps per step is what would make --tls unusable.
+	tlsPath, tlsFile, tlsWriter, tlsStackEnd, resolveTls := this.setupFlowTls(tlsSlots, libName, rva)
+	if tlsFile != nil {
+		defer tlsFile.Close()
+	}
 
 	var savedLR uint64
 	stepCount := 0
@@ -1125,6 +1264,10 @@ func (this *Client) HandleFlow(args []string) {
 		}
 		writer.Write(row)
 
+		if tlsWriter != nil {
+			this.writeFlowTlsStep(tlsWriter, stepCount, ctx.SP, tlsSlots, tlsStackEnd, resolveTls)
+		}
+
 		if !quiet {
 			fmt.Printf("\n%s[Flow Step #%d]%s\n", config.YELLOW, stepCount, config.NC)
 		}
@@ -1141,14 +1284,8 @@ func (this *Client) HandleFlow(args []string) {
 			break
 		}
 
-		stepInto := !stepOver
-		config.Debugf("flow: predicting next pc, stepInto=%v", stepInto)
-		var ok bool
-		if stepOver {
-			ok = this.HandleNext()
-		} else {
-			ok = this.HandleStep()
-		}
+		config.Debugf("flow: predicting next pc, overLevel=%d", overLevel)
+		ok := this.setTempBreakForPredict(overLevel)
 		if !ok {
 			fmt.Printf("Failed to predict next PC at step %d\n", stepCount)
 			config.Debugf("flow: exit reason=predict_failed steps=%d pc=0x%x lr=0x%x", stepCount, pc, savedLR)
@@ -1168,12 +1305,104 @@ func (this *Client) HandleFlow(args []string) {
 
 	writer.Flush()
 	csvFile.Close()
+	if tlsWriter != nil {
+		tlsWriter.Flush()
+	}
 
 	if interrupted {
 		fmt.Printf("%sFlow trace interrupted after %d steps. Partial trace saved to %s%s\n", config.YELLOW, stepCount, csvPath, config.NC)
 	} else {
 		fmt.Printf("Trace saved to %s (%d steps)\n", csvPath, stepCount)
 	}
+	if tlsPath != "" {
+		fmt.Printf("TLS slots saved to %s\n", tlsPath)
+	}
+}
+
+const (
+	flowTlsDefaultSlots = 32
+	flowTlsMaxSlots     = 256
+)
+
+// setupFlowTls opens the run's TLS sidecar and builds the resolver that
+// classifies its slots. Everything is zero-valued when --tls was not asked for,
+// and a failure to set up costs the run its TLS, never the run itself.
+func (this *Client) setupFlowTls(slots int, libName string, rva uint64) (string, *os.File, *csv.Writer, uint64, func(uint64) (utils.TlsClass, string)) {
+	if slots <= 0 {
+		return "", nil, nil, 0, nil
+	}
+	pid := this.Process.WorkPid
+	tid := this.Process.WorkTid
+	if tid == 0 {
+		tid = pid
+	}
+	this.Process.MapsUpToDate[pid] = false
+	maps, err := this.Process.GetCurrentMaps()
+	if err != nil {
+		fmt.Printf("--tls: failed to read maps, continuing without TLS: %v\n", err)
+		return "", nil, nil, 0, nil
+	}
+	stackStart, stackEnd, _, err := maps.FindStackAndTls(tid)
+	if err != nil {
+		fmt.Printf("--tls: %v, continuing without TLS\n", err)
+		return "", nil, nil, 0, nil
+	}
+
+	path := fmt.Sprintf("/data/local/tmp/%s_0x%x_flow_tls.csv", strings.TrimSuffix(libName, ".so"), rva)
+	file, err := os.Create(path)
+	if err != nil {
+		fmt.Printf("--tls: failed to create %s, continuing without TLS: %v\n", path, err)
+		return "", nil, nil, 0, nil
+	}
+	writer := csv.NewWriter(file)
+	writer.Write([]string{"step", "slot", "addr", "value", "class", "annot"})
+
+	regions := maps.Regions()
+	looksLikeString := func(addr uint64) bool { return utils.LooksLikeCString(pid, addr) }
+	resolve := utils.MemoResolver(func(value uint64) (utils.TlsClass, string) {
+		class := utils.Classify(value, regions, stackStart, stackEnd, looksLikeString)
+		switch class {
+		case utils.TlsClassCode:
+			return class, plainSymbol(this.Process.GetSymbol(value))
+		case utils.TlsClassJunk:
+			return class, utils.FormatLEAscii(value)
+		}
+		return class, utils.PeekPtrAnnotate(pid, value)
+	})
+	return path, file, writer, stackEnd, resolve
+}
+
+// writeFlowTlsStep dumps one step's slots. A read that fails costs this step its
+// slots and nothing more — a trace that dies at step 900 of 1000 is worse than
+// one with a gap in it.
+func (this *Client) writeFlowTlsStep(writer *csv.Writer, step int, base uint64, slots int, stackEnd uint64, resolve func(uint64) (utils.TlsClass, string)) {
+	_, dumpLen := utils.ClipDumpRange(base, stackEnd, uint64(slots)*8)
+	if dumpLen == 0 {
+		return
+	}
+	buf := make([]byte, dumpLen)
+	n, err := utils.ReadProcessMemory(this.Process.WorkPid, uintptr(base), buf)
+	if err != nil || n <= 0 {
+		return
+	}
+	for _, r := range utils.FlowTlsRows(step, base, buf[:n], resolve) {
+		writer.Write([]string{
+			strconv.Itoa(r.Step),
+			strconv.Itoa(r.Slot),
+			fmt.Sprintf("0x%x", r.Addr),
+			fmt.Sprintf("0x%x", r.Value),
+			string(r.Class),
+			r.Annot,
+		})
+	}
+}
+
+// plainSymbol strips the colour wrapper GetSymbol adds for terminal output, so
+// a symbol can go into a CSV field instead of a print.
+func plainSymbol(s string) string {
+	s = strings.ReplaceAll(s, config.GREEN, "")
+	s = strings.ReplaceAll(s, config.NC, "")
+	return strings.Trim(s, "<>")
 }
 
 func (this *Client) resolveRegValue(regName string, ctx *controller.ProcessContext) uint64 {
@@ -1290,44 +1519,23 @@ func (this *Client) HandleContinue() bool {
 }
 
 func (this *Client) HandleStep() bool {
-	NextPC, err := utils.PredictNextPC(this.Process.WorkPid, this.Process.Context, true)
-	if NextPC == 0xDEADBEEF {
-		target, err := utils.GetTarget(this.Process.WorkPid, this.Process.Context)
-		if err != nil {
-			fmt.Printf("Failed to get branch target: %v\n", err)
-			return false
-		}
-		address, err := this.Process.ParseAddress(uint64(this.Process.Context.GetPC() + 4))
-		if err != nil {
-			fmt.Printf("Failed to parse nextPC: %v\n", err)
-			return false
-		}
-		this.BrkManager.SetTempBreak(address, this.Process.WorkTid)
-		address2, err := this.Process.ParseAddress(uint64(target))
-		if err != nil {
-			fmt.Printf("Failed to parse nextPC: %v\n", err)
-			return false
-		}
-		this.BrkManager.SetTempBreak(address2, this.Process.WorkTid)
-		// this.HandleContinue()
-		return true
-	}
-	if err != nil {
-		fmt.Printf("Failed to predict next addr: %v\n", err)
-		return false
-	}
-	address, err := this.Process.ParseAddress(uint64(NextPC))
-	if err != nil {
-		fmt.Printf("Failed to parse nextPC: %v\n", err)
-		return false
-	}
-	this.BrkManager.SetTempBreak(address, this.Process.WorkTid)
-	// this.HandleContinue()
-	return true
+	return this.setTempBreakForPredict(0)
 }
 
 func (this *Client) HandleNext() bool {
-	NextPC, err := utils.PredictNextPC(this.Process.WorkPid, this.Process.Context, false)
+	return this.setTempBreakForPredict(1)
+}
+
+func (this *Client) setTempBreakForPredict(overLevel int) bool {
+	var inLib func(uint64) bool
+	if overLevel >= 3 && this.Library != nil {
+		libName := this.Library.LibName
+		inLib = func(addr uint64) bool {
+			a, err := this.Process.ParseAddress(addr)
+			return err == nil && a.LibInfo != nil && a.LibInfo.LibName == libName
+		}
+	}
+	NextPC, err := utils.PredictNextPC(this.Process.WorkPid, this.Process.Context, overLevel, inLib)
 	if NextPC == 0xDEADBEEF {
 		target, err := utils.GetTarget(this.Process.WorkPid, this.Process.Context)
 		if err != nil {
@@ -1346,7 +1554,6 @@ func (this *Client) HandleNext() bool {
 			return false
 		}
 		this.BrkManager.SetTempBreak(address2, this.Process.WorkTid)
-		// this.HandleContinue()
 		return true
 	}
 	if err != nil {
@@ -1359,7 +1566,6 @@ func (this *Client) HandleNext() bool {
 		return false
 	}
 	this.BrkManager.SetTempBreak(address, this.Process.WorkTid)
-	// this.HandleContinue()
 	return true
 }
 
