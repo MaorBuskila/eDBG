@@ -79,6 +79,8 @@ TAG = {
     "input_flow_max":     "inp_flow_max",
     "chk_flow_regs":      "chk_flow_regs",
     "input_flow_mem":     "inp_flow_mem",
+    "chk_flow_tls":       "chk_flow_tls",
+    "input_flow_tls_slots": "inp_flow_tls_slots",
     "chk_flow_quiet":     "chk_flow_quiet",
     "btn_flow":           "btn_flow",
     # bp table
@@ -1200,6 +1202,11 @@ def _cb_flow(sender, app_data, user_data):
     mem_reg = dpg.get_value(TAG["input_flow_mem"]).strip()
     if mem_reg:
         parts.append(f"--mem {mem_reg}")
+    if dpg.get_value(TAG["chk_flow_tls"]):
+        # Go reads the count as the next argv entry; `--tls=32` would reach it
+        # as one unknown flag and abort the run.
+        slots = dpg.get_value(TAG["input_flow_tls_slots"]).strip()
+        parts.append(f"--tls {slots}" if slots else "--tls")
     if dpg.get_value(TAG["chk_flow_quiet"]):
         parts.append("--quiet")
     _session.send_command(" ".join(parts))
@@ -1315,6 +1322,11 @@ def _handle_flow_csv(lines: list[str]) -> None:
             if not _session.pull_file(token, local):
                 _append_log(f"[GUI] Failed to pull {token}")
                 return
+            # The sidecar exists only under --tls, so a failed pull is the
+            # normal case and costs the run its TLS, never its entry.
+            sidecar = token[:-len(".csv")] + "_tls.csv"
+            _session.pull_file(
+                sidecar, os.path.join(_FLOW_DATA_DIR, os.path.basename(sidecar)))
             run = flowtrace.parse_flow_csv(local)
             if run is None:
                 _append_log(f"[GUI] Flow CSV unreadable: {local}")
@@ -1553,6 +1565,9 @@ def _build_pane_flow_history() -> None:
         dpg.add_checkbox(label="Regs", tag=TAG["chk_flow_regs"])
         _hdr("Mem"); dpg.add_input_text(tag=TAG["input_flow_mem"],
                                         width=60, hint="X0")
+        dpg.add_checkbox(label="TLS", tag=TAG["chk_flow_tls"])
+        dpg.add_input_text(tag=TAG["input_flow_tls_slots"], width=50,
+                           default_value="32")
         dpg.add_checkbox(label="Quiet", tag=TAG["chk_flow_quiet"])
         dpg.add_button(label="Run Flow", tag=TAG["btn_flow"],
                        callback=_cb_flow, enabled=False)

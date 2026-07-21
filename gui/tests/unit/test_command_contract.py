@@ -49,7 +49,7 @@ GUI_COMMANDS = [
     "delete 0",
     "display 0x7b80e12340 64 myvar",      # was `<addr> <name> <len>` — swapped
     "thread 12345",
-    "flow 0x1234 --over --max 500 --regs --mem X0 --quiet",  # was single-dash
+    "flow 0x1234 --over --max 500 --regs --mem X0 --tls 32 --quiet",  # was single-dash
     "tls",                                # HandleTls: no args = dump from SP
 ]
 
@@ -100,6 +100,29 @@ def test_flow_flags_are_double_dash():
     for tok in flow.split()[2:]:
         if tok.startswith("-"):
             assert tok.startswith("--"), f"flow flag {tok!r} must be double-dash"
+
+
+def _go_flow_flags() -> set[str]:
+    """Flag names from the `switch args[i]` in Client.HandleFlow."""
+    src = REPL_GO.read_text(encoding="utf-8")
+    start = src.index("func (this *Client) HandleFlow(")
+    end = src.index("\nfunc ", start + 1)
+    return set(re.findall(r'case "(--[a-z]+)"', src[start:end]))
+
+
+def test_every_flow_flag_the_gui_emits_is_a_case_in_go():
+    flow = next(c for c in GUI_COMMANDS if c.startswith("flow "))
+    emitted = {t for t in flow.split()[2:] if t.startswith("-")}
+    assert emitted <= _go_flow_flags(), (
+        f"GUI emits flow flags Go rejects: {sorted(emitted - _go_flow_flags())}")
+
+
+def test_the_tls_slot_count_is_space_separated_like_every_other_flow_value():
+    # Go's parser reads the value as the next argv entry; `--tls=32` would reach
+    # it as one unknown flag and abort the run.
+    flow = next(c for c in GUI_COMMANDS if c.startswith("flow "))
+    assert "--tls 32" in flow
+    assert "--tls=" not in flow
 
 
 def _go_info_subcommands() -> set[str]:

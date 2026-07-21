@@ -321,11 +321,68 @@ def test_seeding_an_empty_dir_selects_nothing(built_ctx, tmp_path):
     assert app._flow_runs == [] and app._flow_selected is None
 
 
+def test_the_tls_sidecar_is_pulled_with_its_run(built_ctx, tmp_path, monkeypatch):
+    remote = "/data/local/tmp/libloader_0x1c6f68_flow.csv"
+    remote_tls = "/data/local/tmp/libloader_0x1c6f68_flow_tls.csv"
+    asked = []
+
+    def fake_pull(src, dest):
+        asked.append(src)
+        with open(dest, "w") as fh:
+            fh.write(TLS_SIDECAR if src == remote_tls else BARE)
+        return True
+
+    monkeypatch.setattr(app._session, "pull_file", fake_pull)
+    monkeypatch.setattr(app, "_FLOW_DATA_DIR", str(tmp_path))
+    app._handle_flow_csv([f"Trace saved to {remote} (3 steps)"])
+    assert remote_tls in asked
+    assert app._flow_runs[0].has_tls
+
+
+def test_a_run_without_a_sidecar_still_enters_history(built_ctx, tmp_path,
+                                                      monkeypatch):
+    remote = "/data/local/tmp/libloader_0x1c6f68_flow.csv"
+
+    def fake_pull(src, dest):
+        if src.endswith("_flow_tls.csv"):
+            return False          # --tls was never asked for
+        with open(dest, "w") as fh:
+            fh.write(BARE)
+        return True
+
+    monkeypatch.setattr(app._session, "pull_file", fake_pull)
+    monkeypatch.setattr(app, "_FLOW_DATA_DIR", str(tmp_path))
+    app._handle_flow_csv([f"Trace saved to {remote} (3 steps)"])
+    assert len(app._flow_runs) == 1
+    assert not app._flow_runs[0].has_tls
+
+
+def test_the_launch_command_carries_the_tls_slot_count(built_ctx, monkeypatch):
+    sent = []
+    monkeypatch.setattr(app._session, "send_command", lambda cmd: sent.append(cmd))
+    dpg.set_value(app.TAG["input_flow_addr"], "0x1c6f68")
+    dpg.set_value(app.TAG["chk_flow_tls"], True)
+    dpg.set_value(app.TAG["input_flow_tls_slots"], "16")
+    app._cb_flow(None, None, None)
+    assert "--tls 16" in sent[0]
+
+
+def test_tls_is_left_out_when_it_was_not_asked_for(built_ctx, monkeypatch):
+    sent = []
+    monkeypatch.setattr(app._session, "send_command", lambda cmd: sent.append(cmd))
+    dpg.set_value(app.TAG["input_flow_addr"], "0x1c6f68")
+    dpg.set_value(app.TAG["chk_flow_tls"], False)
+    app._cb_flow(None, None, None)
+    assert "--tls" not in sent[0]
+
+
 def test_a_pulled_csv_enters_history(built_ctx, tmp_path, monkeypatch):
     remote = "/data/local/tmp/libloader_0x1c6f68_flow.csv"
     (tmp_path / "src.csv").write_text(BARE)
 
     def fake_pull(src, dest):
+        if src.endswith("_flow_tls.csv"):
+            return False
         assert src == remote
         with open(dest, "w") as fh:
             fh.write(BARE)
