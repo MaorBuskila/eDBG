@@ -475,6 +475,8 @@ _COPY_SOURCES = {
                          lambda: flowtrace.flow_to_text(_flow_run())),
     "pane_flow_history": ("Flow history", lambda: _flow_history_to_text()),
     "pane_flow_regs":   ("Step registers", lambda: _flow_regs_to_text()),
+    "pane_flow_mem":    ("Step memory", lambda: _flow_mem_to_text()),
+    "pane_flow_tls":    ("Step TLS", lambda: _flow_tls_to_text()),
     "pane_log":         ("Log",
                          lambda: textdump.log_to_text(_session.transcript)),
 }
@@ -623,6 +625,15 @@ _flow_selected: int | None = None
 _flow_step: int = 0
 
 
+#: What a pane says when the run simply never captured it. Naming the flag is
+#: the difference between "this is empty" and "this looks broken".
+_MISSING_FLAG = {
+    "--regs": "(run captured without --regs)",
+    "--mem":  "(run captured without --mem)",
+    "--tls":  "(run captured without --tls)",
+}
+
+
 def _flow_run():
     """The selected run, or None."""
     if _flow_selected is None or not 0 <= _flow_selected < len(_flow_runs):
@@ -697,9 +708,57 @@ def _flow_regs_to_text() -> str:
     if run is None:
         return "(no step selected)"
     if not run.has_regs:
-        return textdump.regs_to_text(_session.last_regs)
+        return _MISSING_FLAG["--regs"]
     return "\n".join(f"{name:<6} 0x{value:x}"
                      for name, value in run.regs_at(_flow_step))
+
+
+def _flow_mem_to_text() -> str:
+    run = _flow_run()
+    if run is None:
+        return "(no step selected)"
+    if not run.has_mem:
+        return _MISSING_FLAG["--mem"]
+    addr, value = run.mem_at(_flow_step)
+    shown = "ERR" if value is None else f"0x{value:x}"
+    return f"[0x{addr:x}] = {shown}"
+
+
+def _flow_tls_to_text() -> str:
+    run = _flow_run()
+    if run is None:
+        return "(no step selected)"
+    if not run.has_tls:
+        return _MISSING_FLAG["--tls"]
+    slots = run.tls_at(_flow_step)
+    if not slots:
+        return "(no tls at this step)"
+    return "\n".join(
+        f"+0x{s.slot * 8:<4x} 0x{s.value:016x}  {s.cls:<7} {s.annot}".rstrip()
+        for s in slots)
+
+
+@_safe
+def _cb_copy_value(sender, app_data, user_data):
+    """A captured value goes to the clipboard and nowhere else.
+
+    The process this run traced is gone, so there is nothing here to ask.
+    """
+    _copy(user_data, user_data)
+
+
+def _flow_step_header(tag: str, run) -> None:
+    """Which step of which run the pane below is showing.
+
+    The RVA is the one value here worth reusing: `flow` takes a
+    library-relative offset, so one click re-launches from this step.
+    """
+    with dpg.group(horizontal=True, parent=tag):
+        dpg.add_text(f"step #{_flow_step}", color=theme.ACCENT_AMBER)
+        dpg.add_text(f" of {run.steps}", color=theme.TEXT_DIM)
+        rva = run.rows[_flow_step].rva
+        dpg.add_selectable(label=f"  +0x{rva:x}", width=0,
+                           user_data=f"0x{rva:x}", callback=_cb_use_address)
 
 
 def _flow_window(total: int, selected: int) -> tuple:
@@ -782,32 +841,68 @@ def _populate_flow_regs() -> None:
         dpg.add_text("(no step selected)", parent=tag, color=theme.TEXT_DIM)
         return
     if not run.has_regs:
-        dpg.add_text("(run captured without --regs — showing live registers)",
-                     parent=tag, color=theme.TEXT_DIM)
-        _render_regs(tag, _session.last_regs)
+        dpg.add_text(_MISSING_FLAG["--regs"], parent=tag, color=theme.TEXT_DIM)
         return
-    with dpg.group(horizontal=True, parent=tag):
-        dpg.add_text(f"step #{_flow_step}", color=theme.ACCENT_AMBER)
-        dpg.add_text(f" of {run.steps}", color=theme.TEXT_DIM)
-        dpg.add_text(f"  0x{run.rows[_flow_step].va:x}", color=theme.TEXT_DIM)
+    _flow_step_header(tag, run)
     changed = _flow_changed_regs()
     for name, value in run.regs_at(_flow_step):
         with dpg.group(horizontal=True, parent=tag):
             moved = name in changed
             dpg.add_text(" *" if moved else "  ", color=theme.ACCENT_RED)
             dpg.add_text(f"{name:<6}", color=theme.ACCENT_CYAN)
-            dpg.add_text(f"0x{value:x}",
-                         color=theme.ACCENT_RED if moved else theme.TEXT)
+            dpg.add_selectable(label=f"0x{value:x}", width=0,
+                               user_data=f"0x{value:x}", callback=_cb_copy_value)
 
 
 def _populate_flow_mem() -> None:
     if not _take_paint("pane_flow_mem"):
         return
+    tag = TAG["pane_flow_mem"]
+    dpg.delete_item(tag, children_only=True)
+    run = _flow_run()
+    if run is None:
+        dpg.add_text("(no step selected)", parent=tag, color=theme.TEXT_DIM)
+        return
+    if not run.has_mem:
+        dpg.add_text(_MISSING_FLAG["--mem"], parent=tag, color=theme.TEXT_DIM)
+        return
+    addr, value = run.mem_at(_flow_step)
+    with dpg.group(horizontal=True, parent=tag):
+        dpg.add_selectable(label=f"[0x{addr:x}]", width=0,
+                           user_data=f"0x{addr:x}", callback=_cb_copy_value)
+        dpg.add_text(" = ", color=theme.TEXT_DIM)
+        if value is None:
+            dpg.add_text("ERR", color=theme.ACCENT_RED)
+        else:
+            dpg.add_selectable(label=f"0x{value:x}", width=0,
+                               user_data=f"0x{value:x}", callback=_cb_copy_value)
 
 
 def _populate_flow_tls() -> None:
     if not _take_paint("pane_flow_tls"):
         return
+    tag = TAG["pane_flow_tls"]
+    dpg.delete_item(tag, children_only=True)
+    run = _flow_run()
+    if run is None:
+        dpg.add_text("(no step selected)", parent=tag, color=theme.TEXT_DIM)
+        return
+    if not run.has_tls:
+        dpg.add_text(_MISSING_FLAG["--tls"], parent=tag, color=theme.TEXT_DIM)
+        return
+    slots = run.tls_at(_flow_step)
+    if not slots:
+        dpg.add_text("(no tls at this step)", parent=tag, color=theme.TEXT_DIM)
+        return
+    for s in slots:
+        with dpg.group(horizontal=True, parent=tag):
+            dpg.add_text(f"+0x{s.slot * 8:<4x}", color=theme.TEXT_DIM)
+            dpg.add_selectable(label=f"0x{s.value:016x}", width=0,
+                               user_data=f"0x{s.value:x}", callback=_cb_copy_value)
+            dpg.add_text(f" {s.cls:<7}",
+                         color=_TLS_CLASS_COLOR.get(s.cls, theme.TEXT))
+            if s.annot:
+                dpg.add_text(f" {s.annot}", color=theme.ACCENT_GREEN)
 
 
 def _populate_watch() -> None:

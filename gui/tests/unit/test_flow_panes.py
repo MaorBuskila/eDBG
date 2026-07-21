@@ -72,6 +72,37 @@ def _run(tmp_path, name: str, text: str):
     return flowtrace.parse_flow_csv(str(p))
 
 
+def _texts(pane: str) -> list:
+    """Every string rendered in `pane`, groups flattened."""
+    out = []
+    for item in dpg.get_item_children(app.TAG[pane], 1):
+        cfg = dpg.get_item_configuration(item)
+        if cfg.get("label"):
+            out.append(cfg["label"])
+        value = dpg.get_value(item)
+        if isinstance(value, str) and value:
+            out.append(value)
+        for child in dpg.get_item_children(item, 1):
+            ccfg = dpg.get_item_configuration(child)
+            if ccfg.get("label"):
+                out.append(ccfg["label"])
+            cvalue = dpg.get_value(child)
+            if isinstance(cvalue, str) and cvalue:
+                out.append(cvalue)
+    return out
+
+
+def _selectables(pane: str) -> list:
+    """Clickable rows in `pane`, at either nesting level."""
+    out = []
+    for item in dpg.get_item_children(app.TAG[pane], 1):
+        items = [item] + list(dpg.get_item_children(item, 1))
+        for i in items:
+            if dpg.get_item_type(i).endswith("mvSelectable"):
+                out.append(i)
+    return out
+
+
 # ── Task 4: the trace pane ───────────────────────────────────────────
 
 def test_a_new_run_is_selected_and_marks_all_three_panes(built_ctx, tmp_path):
@@ -328,19 +359,135 @@ def test_first_step_has_nothing_to_diff_against(built_ctx, tmp_path):
     assert app._flow_changed_regs() == set()
 
 
-def test_a_run_without_regs_falls_back_to_live_registers(built_ctx, tmp_path):
+def test_a_run_without_regs_says_so_instead_of_borrowing_live_ones(
+        built_ctx, tmp_path):
+    # A step index from a file on disk and a register from the live process are
+    # two different moments in time. One pane must not show both.
     app._session.last_regs = [
         parse.RegisterInfo(name="X0", value=0x1234, deref=None, symbol="")]
     app._add_flow_run(_run(tmp_path, "a_0x1_flow.csv", BARE))
     app._populate_flow_regs()
-    # one note about the missing --regs, plus the live registers
-    assert _rows("pane_flow_regs") == 1 + 1
+    assert _rows("pane_flow_regs") == 1
+    assert "--regs" in _texts("pane_flow_regs")[0]
+    assert "0x1234" not in " ".join(_texts("pane_flow_regs"))
 
 
 def test_no_run_selected_shows_a_placeholder(built_ctx):
     app._dirty.mark("pane_flow_regs")
     app._populate_flow_regs()
     assert _rows("pane_flow_regs") == 1
+
+
+# ── v4: the step memory probe ────────────────────────────────────────
+
+WITH_MEM = """\
+step,va,rva,mem_addr,mem_value
+0,0x7ab60abf68,0x1c6f68,0x7b4070d728,0x4142434445464748
+1,0x7ab60abf6c,0x1c6f6c,0x7b4070d728,ERR
+"""
+
+
+def test_step_memory_shows_the_probed_pair(built_ctx, tmp_path):
+    app._add_flow_run(_run(tmp_path, "a_0x1_flow.csv", WITH_MEM))
+    app._populate_flow_mem()
+    joined = " ".join(_texts("pane_flow_mem"))
+    assert "0x7b4070d728" in joined
+    assert "0x4142434445464748" in joined
+
+
+def test_a_failed_probe_reads_as_an_error_not_a_zero(built_ctx, tmp_path):
+    app._add_flow_run(_run(tmp_path, "a_0x1_flow.csv", WITH_MEM))
+    app._cb_flow_pick(None, True, (0, 1))
+    app._populate_flow_mem()
+    joined = " ".join(_texts("pane_flow_mem"))
+    assert "ERR" in joined and "0x0" not in joined
+
+
+def test_a_run_without_mem_says_which_flag_was_missing(built_ctx, tmp_path):
+    app._add_flow_run(_run(tmp_path, "a_0x1_flow.csv", BARE))
+    app._populate_flow_mem()
+    assert "--mem" in " ".join(_texts("pane_flow_mem"))
+
+
+# ── v4: the step TLS slots ───────────────────────────────────────────
+
+TLS_SIDECAR = """\
+step,slot,addr,value,class,annot
+0,0,0x7b4070d750,0x7b4070d800,stack,
+0,1,0x7b4070d758,0x7ab60e0078,code,libloader.so+0x1fb078
+1,0,0x7b4070d750,0x0,junk,|........|
+"""
+
+
+def _run_with_tls(tmp_path, text=BARE):
+    (tmp_path / "a_0x1_flow_tls.csv").write_text(TLS_SIDECAR)
+    return _run(tmp_path, "a_0x1_flow.csv", text)
+
+
+def test_step_tls_lists_the_captured_slots(built_ctx, tmp_path):
+    app._add_flow_run(_run_with_tls(tmp_path))
+    app._populate_flow_tls()
+    joined = " ".join(_texts("pane_flow_tls"))
+    assert "0x0000007ab60e0078" in joined
+    assert "code" in joined
+    assert "libloader.so+0x1fb078" in joined
+
+
+def test_step_tls_follows_the_selected_step(built_ctx, tmp_path):
+    app._add_flow_run(_run_with_tls(tmp_path))
+    app._cb_flow_pick(None, True, (0, 1))
+    app._populate_flow_tls()
+    joined = " ".join(_texts("pane_flow_tls"))
+    assert "junk" in joined
+    assert "0x0000007ab60e0078" not in joined
+
+
+def test_a_step_the_capture_never_reached_is_empty_not_wrong(built_ctx, tmp_path):
+    app._add_flow_run(_run_with_tls(tmp_path))
+    app._cb_flow_pick(None, True, (0, 2))
+    app._populate_flow_tls()
+    assert "(no tls" in " ".join(_texts("pane_flow_tls")).lower()
+
+
+def test_a_run_without_tls_says_which_flag_was_missing(built_ctx, tmp_path):
+    app._add_flow_run(_run(tmp_path, "a_0x1_flow.csv", BARE))
+    app._populate_flow_tls()
+    assert "--tls" in " ".join(_texts("pane_flow_tls"))
+
+
+# ── v4: every captured value is clickable, and only copies ───────────
+
+def test_captured_values_are_clickable(built_ctx, tmp_path):
+    app._add_flow_run(_run_with_tls(tmp_path, WITH_REGS))
+    app._populate_flow_regs()
+    app._populate_flow_tls()
+    assert _selectables("pane_flow_regs"), "a register value cannot be picked up"
+    assert _selectables("pane_flow_tls"), "a TLS slot cannot be picked up"
+
+
+def test_clicking_a_captured_value_talks_to_no_process(built_ctx, tmp_path,
+                                                       monkeypatch):
+    # The process this run traced is gone. A click here is a clipboard action.
+    sent = []
+    monkeypatch.setattr(app._session, "send_command", lambda cmd: sent.append(cmd))
+    monkeypatch.setattr(app.dpg, "set_clipboard_text", lambda text: None)
+    app._add_flow_run(_run_with_tls(tmp_path, WITH_REGS))
+    app._populate_flow_regs()
+    for item in _selectables("pane_flow_regs"):
+        cfg = dpg.get_item_configuration(item)
+        cfg["callback"](item, True, cfg["user_data"])
+    assert sent == []
+
+
+def test_no_flow_pane_reads_live_session_state():
+    # SPEC_gui_v4 AC 1. The fallback this replaces rendered live registers under
+    # a step index from a file, which is two moments in time in one pane.
+    import inspect
+    for fn in (app._populate_flow, app._populate_flow_regs,
+               app._populate_flow_mem, app._populate_flow_tls,
+               app._populate_flow_history, app._flow_regs_to_text):
+        src = inspect.getsource(fn)
+        assert "_session.last_" not in src, f"{fn.__name__} reads live state"
 
 
 # ── gating still applies ─────────────────────────────────────────────
