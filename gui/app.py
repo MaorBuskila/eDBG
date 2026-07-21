@@ -876,11 +876,22 @@ def _build_hud() -> None:
                        callback=_cb_until, enabled=False)
 
 
+def _mode_button_label(name: str, active: bool) -> str:
+    """Active mode is marked in the label, not by a bound theme.
+
+    Theme ids belong to the DPG context that created them, so a global holding
+    one goes stale the moment a context is replaced. A label carries no such
+    lifetime.
+    """
+    marker = "▸" if active else " "
+    return f"{marker} {modes.MODES[name].label} ({modes.MODE_KEYS[name]}) "
+
+
 def _build_mode_bar() -> None:
     dpg.add_separator()
     with dpg.group(horizontal=True):
-        for name, mode in modes.MODES.items():
-            dpg.add_button(label=f" {mode.label} ({modes.MODE_KEYS[name]}) ",
+        for name in modes.MODES:
+            dpg.add_button(label=_mode_button_label(name, name == modes.DEFAULT_MODE),
                            tag=mode_button_tag(name),
                            user_data=name, callback=_cb_mode)
     dpg.add_separator()
@@ -1071,6 +1082,8 @@ def _apply_pane_heights() -> None:
     This is height arithmetic only — column widths and positions belong to the
     primary window and the stretch table.
     """
+    if not dpg.is_viewport_ok():
+        return          # headless build: heights land on the first real frame
     avail = max(200, dpg.get_viewport_client_height() - _CHROME_H)
     for pane, height in _pane_heights(avail, _active_mode).items():
         dpg.configure_item(TAG[pane], height=height)
@@ -1090,9 +1103,16 @@ def _set_mode(name: str) -> None:
     for col, weight in zip(modes.COLUMNS, modes.col_weights(name)):
         dpg.configure_item(column_tag(col), init_width_or_weight=weight)
     for mode_name in modes.MODES:
-        dpg.bind_item_theme(mode_button_tag(mode_name),
-                            _theme_run_btn if mode_name == name else 0)
+        dpg.configure_item(mode_button_tag(mode_name),
+                           label=_mode_button_label(mode_name, mode_name == name))
     _apply_pane_heights()
+
+
+def _set_mode_by_key(key: str) -> None:
+    for name, bound in modes.MODE_KEYS.items():
+        if bound == key:
+            _set_mode(name)
+            return
 
 
 @_safe
@@ -1125,6 +1145,10 @@ def _setup_keybindings():
         dpg.add_key_press_handler(dpg.mvKey_F5, callback=_cb_continue)
         dpg.add_key_press_handler(dpg.mvKey_F10, callback=_cb_next)
         dpg.add_key_press_handler(dpg.mvKey_F11, callback=_cb_step)
+        for name, key in modes.MODE_KEYS.items():
+            dpg.add_key_press_handler(
+                getattr(dpg, f"mvKey_{key}"),
+                callback=_safe(lambda s, a, u, m=name: _set_mode(m)))
 
 
 # =====================================================================
