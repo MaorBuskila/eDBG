@@ -33,6 +33,7 @@ type ThreadFilter struct {
 type UserConfig struct {
 	Registers     bool
 	Disasm        bool
+	Backtrace     bool
 	HitOnly       bool
 	ScriptFile    string
 	FlowMode      bool
@@ -141,7 +142,13 @@ func (this *Client) OutputInfo() {
 		fmt.Print(config.NC)
 		this.PrintDisplay()
 	}
-	if this.Config.Registers || this.Config.Disasm || cntDisplay > 0 {
+	if this.Config.Backtrace && !config.FlowTracing {
+		fmt.Print(config.BLUE)
+		fmt.Println("──────────────────────────────────────[ BACKTRACE ]──────────────────────────────────────")
+		fmt.Print(config.NC)
+		this.HandleBacktraceByUnwind(nil)
+	}
+	if this.Config.Registers || this.Config.Disasm || this.Config.Backtrace || cntDisplay > 0 {
 		fmt.Print(config.BLUE)
 		fmt.Println("─────────────────────────────────────────────────────────────────────────────────────────")
 		fmt.Print(config.NC)
@@ -1049,7 +1056,7 @@ func (this *Client) HandleFlow(args []string) {
 		fmt.Println("  --over 2  step over all branches except RET")
 		fmt.Println("  --over 3  follow only transfers that stay in current lib")
 		fmt.Printf("  --tls N   dump N stack_and_tls slots per step to a sidecar CSV (default %d, max %d)\n", flowTlsDefaultSlots, flowTlsMaxSlots)
-		fmt.Println("  CLI: eDBG -p <pkg> -l <lib> -flow -flow-over[=N] [-v]")
+		fmt.Println("  CLI: eDBG -n <pkg> -l <lib> -flow -flow-over[=N] [-v]")
 		return
 	}
 
@@ -1433,10 +1440,18 @@ func (this *Client) resolveRegValue(regName string, ctx *controller.ProcessConte
 
 func (this *Client) HandleHBreak(args []string, Type int) {
 	if len(args) == 0 {
-		fmt.Println("Usage: hbreak <address>")
+		fmt.Println("Usage: hbreak <address>[:x|r|w|rw]")
 		return
 	}
-	address, err := this.ParseUserAddress(args[0])
+	addrStr, tp, explicit, err := config.SplitAccessSuffix(args[0])
+	if err != nil {
+		fmt.Printf("Failed to parse address: %v\n", err)
+		return
+	}
+	if explicit {
+		Type = tp
+	}
+	address, err := this.ParseUserAddress(addrStr)
 	if err != nil {
 		fmt.Printf("Failed to parse address: %v\n", err)
 		return
@@ -1452,7 +1467,7 @@ func (this *Client) HandleHBreak(args []string, Type int) {
 	if err = this.BrkManager.CreateHWBreakPoint(address, true, Type); err != nil {
 		fmt.Printf("Failed to set breakpoint: %v\n", err)
 	} else {
-		fmt.Printf("Breakpoint at %x\n", address.Absolute)
+		fmt.Printf("Breakpoint at %x %s\n", address.Absolute, config.HWAccessName(Type))
 	}
 }
 

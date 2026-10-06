@@ -22,6 +22,19 @@ var linkerSearchPaths = []string{
 
 const callConstructorsSymbol = "__dl__ZN6soinfo17call_constructorsEv"
 
+// IsLinkerBinary reports names that are the dynamic linker, not a library it loads.
+func IsLinkerBinary(name string) bool {
+	base := name
+	if i := strings.LastIndex(name, "/"); i >= 0 {
+		base = name[i+1:]
+	}
+	switch base {
+	case "linker64", "linker", "ld-android.so":
+		return true
+	}
+	return false
+}
+
 func findZygotePid() uint32 {
 	content, err := utils.RunCommand("sh", "-c", "ps -A -o pid,name | grep -E 'zygote64$' | head -1")
 	if err != nil {

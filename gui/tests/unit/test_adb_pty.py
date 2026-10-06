@@ -95,7 +95,7 @@ class TestStart:
         args = mock_popen.call_args
         cmd = args[0][0] if args[0] else args[1].get("args")
         cmd_str = " ".join(cmd)
-        assert "-p com.foo.bar" in cmd_str
+        assert "-n com.foo.bar" in cmd_str
         assert "-l libfoo.so" in cmd_str
         pty.stop()
 

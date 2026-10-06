@@ -213,25 +213,49 @@ func (this *BreakPointManager) Init() error {
 	return this.ProbeHandler.SetupManagerOptions()
 }
 
+func hwBreakType(addr *controller.Address) int {
+	if addr != nil && addr.BrkType != 0 {
+		return addr.BrkType
+	}
+	return config.HW_BREAKPOINT_X
+}
+
 func (this *BreakPointManager) Start(addresss []*controller.Address) error {
-	if config.Preference == config.ALL_PERF && len(addresss) > 0 {
+	var hwAddrs, swAddrs []*controller.Address
+	for _, addr := range addresss {
+		if config.Preference == config.ALL_PERF || config.IsDataWatch(addr.BrkType) {
+			hwAddrs = append(hwAddrs, addr)
+		} else {
+			swAddrs = append(swAddrs, addr)
+		}
+	}
+
+	if len(hwAddrs) > 0 {
 		this.process.UpdatePidList()
 		if len(this.process.PidList) > 0 {
 			this.process.WorkPid = this.process.PidList[0]
 		}
-		config.Debugf("Start: Preference=ALL_PERF, WorkPid=%d, PidList=%v", this.process.WorkPid, this.process.PidList)
+		config.Debugf("Start: hardware breaks=%d WorkPid=%d PidList=%v", len(hwAddrs), this.process.WorkPid, this.process.PidList)
 		needWait := false
-		for _, addr := range addresss {
+		for _, addr := range hwAddrs {
 			absAddr, err := this.process.GetAbsoluteAddress(addr)
 			if err != nil {
 				config.Debugf("Start: GetAbsoluteAddress(%s+0x%x) failed: %v -> entering linker-wait", addr.LibInfo.LibName, addr.Offset, err)
 				needWait = true
 				break
 			}
-			config.Debugf("Start: GetAbsoluteAddress(%s+0x%x) = 0x%x", addr.LibInfo.LibName, addr.Offset, absAddr)
+			addr.Absolute = absAddr
+			config.Debugf("Start: GetAbsoluteAddress(%s+0x%x) = 0x%x %s", addr.LibInfo.LibName, addr.Offset, absAddr, config.HWAccessName(hwBreakType(addr)))
 		}
 		if needWait {
-			return this.startLinkerCtorWait(addresss)
+			if !this.FlowMode {
+				for _, addr := range swAddrs {
+					if err := this.CreateBreakPoint(addr, true); err != nil {
+						fmt.Printf("Create Breakpoints Failed: %v, skipped.\n", err)
+					}
+				}
+			}
+			return this.startLinkerCtorWait(hwAddrs)
 		}
 	}
 
@@ -239,19 +263,29 @@ func (this *BreakPointManager) Start(addresss []*controller.Address) error {
 		return nil
 	}
 
-	for _, addr := range addresss {
-		var err error
-		if config.Preference == config.ALL_PERF {
-			err = this.CreateHWBreakPoint(addr, true, config.HW_BREAKPOINT_X)
-		} else {
-			err = this.CreateBreakPoint(addr, true)
-		}
-		if err != nil {
+	for _, addr := range swAddrs {
+		if err := this.CreateBreakPoint(addr, true); err != nil {
 			fmt.Printf("Create Breakpoints Failed: %v, skipped.\n", err)
-			continue
+		}
+	}
+	for _, addr := range hwAddrs {
+		if err := this.CreateHWBreakPoint(addr, true, hwBreakType(addr)); err != nil {
+			fmt.Printf("Create Breakpoints Failed: %v, skipped.\n", err)
 		}
 	}
 	return this.SetupProbe()
+}
+
+// StartStopOnLoad arms the linker ctor probe with no pending breakpoints.
+// The target is halted at soinfo::call_constructors when TargetLibName loads
+// and is NOT resumed to any breakpoint (see OnLinkerCtorHit / event listener).
+func (this *BreakPointManager) StartStopOnLoad() error {
+	this.process.UpdatePidList()
+	if len(this.process.PidList) > 0 {
+		this.process.WorkPid = this.process.PidList[0]
+	}
+	config.StopOnLoad = true
+	return this.startLinkerCtorWait(nil)
 }
 
 func (this *BreakPointManager) startLinkerCtorWait(addresses []*controller.Address) error {
@@ -276,12 +310,18 @@ func (this *BreakPointManager) startLinkerCtorWait(addresses []*controller.Addre
 		}
 		config.Debugf("startLinkerCtorWait: resolved UID from package: %d (err=%v)", targetUID, err)
 	}
-	config.Debugf("startLinkerCtorWait: targetUID=%d filterLib=%q", targetUID, this.TargetLibName)
+	filterLib := this.TargetLibName
+	if controller.IsLinkerBinary(filterLib) {
+		// linker64 is already mapped; it never appears as a solib soname.
+		config.Debugf("startLinkerCtorWait: target is the linker; match first ctor")
+		filterLib = ""
+	}
+	config.Debugf("startLinkerCtorWait: targetUID=%d filterLib=%q", targetUID, filterLib)
 
 	return this.ProbeHandler.SetupLinkerProbe(
 		linkerInfo.Path,
 		linkerInfo.CtorSymbolOffset,
-		this.TargetLibName,
+		filterLib,
 		linkerInfo.SonameFieldOffset,
 		targetUID,
 	)
@@ -304,6 +344,14 @@ func (this *BreakPointManager) OnLinkerCtorHit() error {
 	config.Debugf("OnLinkerCtorHit: PidList=%v WorkPid=%d", this.process.PidList, this.process.WorkPid)
 	this.process.UpdateMaps()
 
+	if config.StopOnLoad {
+		// Stop-on-load mode: the target is halted at the library constructor.
+		// Do NOT set any breakpoint and do NOT resume; the event listener holds it.
+		config.Debugf("OnLinkerCtorHit: StopOnLoad, halting at ctor without setting breakpoints")
+		this.pendingHWBreaks = nil
+		return nil
+	}
+
 	if this.FlowMode {
 		config.Debugf("OnLinkerCtorHit: FlowMode, skipping breakpoint setup")
 		this.pendingHWBreaks = nil
@@ -319,12 +367,13 @@ func (this *BreakPointManager) OnLinkerCtorHit() error {
 		}
 		config.Debugf("OnLinkerCtorHit: resolved to 0x%x", absAddr)
 		addr.Absolute = absAddr
-		err = this.CreateHWBreakPoint(addr, true, config.HW_BREAKPOINT_X)
+		tp := hwBreakType(addr)
+		err = this.CreateHWBreakPoint(addr, true, tp)
 		if err != nil {
 			fmt.Printf("Failed to create HW breakpoint at 0x%x: %v\n", absAddr, err)
 			continue
 		}
-		fmt.Printf("HW breakpoint set at 0x%x (%s+0x%x)\n", absAddr, addr.LibInfo.LibName, addr.Offset)
+		fmt.Printf("HW breakpoint set at 0x%x (%s+0x%x) %s\n", absAddr, addr.LibInfo.LibName, addr.Offset, config.HWAccessName(tp))
 	}
 
 	this.pendingHWBreaks = nil
@@ -365,7 +414,7 @@ func (this *BreakPointManager) PrintBreakPoints() {
 			fmt.Printf("[+] ")
 		}
 		if brk.Hardware {
-			fmt.Printf("%d: %x Hardware\n", id, brk.Addr.Absolute)
+			fmt.Printf("%d: %x Hardware %s\n", id, brk.Addr.Absolute, config.HWAccessName(brk.Type))
 		} else {
 			fmt.Printf("%d: %s+%x\n", id, brk.Addr.LibInfo.LibName, brk.Addr.Offset)
 		}

@@ -20,6 +20,8 @@
 - Supports common debugging functionalities (see "Command Details")
 - Uses pwndbg-like CLI interface with GDB-style interactions for ease of use
 - File+offset based breakpoint registration enables quick startup and supports multi-thread/process debugging
+- **Flow trace**: record a linear instruction path from an RVA into a CSV (CLI `-flow` or REPL `flow`), stepping with hardware breakpoints until control returns to the saved LR (or max steps)
+- **Hit context**: each stop prints the **pid** and **tid** of the thread that hit the probe (when output is not suppressed)
 - Supports MCP mode, giving LLMs stable dynamic-analysis capabilities with little to no need to bypass anti-debugging.
 
 ## 💕 Demo
@@ -36,24 +38,27 @@
 1. Download prebuilt binaries from [Releases](https://github.com/ShinoLeah/eDBG/releases)
 
 2. Push to device and grant permissions:
+
    ```shell
    adb push eDBG /data/local/tmp
    adb shell
    su
    chmod +x /data/local/tmp/eDBG
-
+   ```
 
 3. Start debugger:
 
    ```shell
-   ./eDBG -p com.package.name -l libname.so -b 0x123456
+   ./eDBG -n com.package.name -l libname.so -b 0x123456
    ```
 
-   | Option |              Description              |
-   | :----: | :-----------------------------------: |
-   |   -p   |        Target app package name        |
-   |   -l   |      Target shared library name       |
-   |   -b   | Initial breakpoints (comma-separated) |
+   | Option | Description |
+   | :----: | :---------- |
+   |   -n   | Target app package name |
+   |   -p   | Attach to an existing process by PID |
+   |   -l   | Target shared library name |
+   |   -b   | Initial file-offset breakpoints/watchpoints (e.g. `0x1234,0x5678:rw`) |
+   |   -vb  | Initial **virtual** (IDA-style) RVA breakpoints/watchpoints (do not combine with `-b`) |
    
 4. Launch target app:
 
@@ -62,7 +67,7 @@
 ## ⚠️ Notes
 
 - Debugging system libraries (e.g., `libc.so`, `libart.so`) may cause lag due to file+offset mechanism
-- Program pause isn't supported without active breakpoints]
+- Program pause isn't supported without active breakpoints
 - **Command works only when program is suspended**  
 - Thread ID specification during startup isn't supported
 - Maximum 20 active breakpoints
@@ -99,6 +104,7 @@
   - `disable <id>`: Disable breakpoint
   - `delete <id>`: Remove breakpoint
 - **Repeat Command**: Press Enter with empty input
+- **Flow trace** `flow`: Log PCs to `/data/local/tmp/` CSV (see **Flow trace** under Advanced Usage); CLI shortcut: `-flow` with `-b` / `-vb`
 
 More commands in "Advanced Usage".
 
@@ -112,34 +118,102 @@ More commands in "Advanced Usage".
    sudo apt-get install clang-14
    export GOPROXY=https://goproxy.cn,direct
    export GO111MODULE=on
+   ```
 
-2. **NDK Setup** Download NDK and modify NDK_ROOT in build_arm.sh
+2. **NDK Setup** Install Android NDK `29.0.13599879`, or set `NDK_VERSION` to an installed version.
 
 3. **Build**
 
    ```shell
    git clone --recursive https://github.com/ShinoLeah/eDBG.git
-   ./build_env.sh
-   ./build_arm.sh
+   cd eDBG
+   ./build.sh
+   ```
+
+   `build.sh` uses Homebrew LLVM for eBPF, generates embedded assets, and builds
+   `bin/eDBG_arm64`. Override the NDK when needed:
+
+   ```shell
+   NDK_VERSION=30.0.15729638 ./build.sh
    ```
 
 ## 🧑‍💻 Advanced Usage
 
-More options:
+### Extra CLI flags
 
-|      Option       |                  Description                  |
-| :---------------: | :-------------------------------------------: |
-|        -t         | Thread name filter for eBPF (comma-separated) |
-|        -i         |        Load config from specified file        |
-|        -s         |           Save config to input file           |
-|        -o         |         Save config to specified file         |
-|  -hide-register   |     Disable register info on breakpoints      |
-| -hide-disassemble |     Disable assembly info on breakpoints      |
-|      -prefer      |              uprobe or hardware               |
-|  -disable-color   |            disable colorful output            |
-|   -show-vertual   |        show vertual address by default        |
-|       -mcp        |      start the HTTP MCP server on device      |
-|     -mcp-port     |   MCP listening port, default is `19810`     |
+| Option | Description |
+| :----- | :---------- |
+| `-t` | Thread name filter for eBPF (comma-separated, e.g. `[Binder,Main]`) |
+| `-u` | Target app UID for process filtering |
+| `-i` | Load config from a saved `.edbg` JSON file |
+| `-s` | Save progress to the same path as `-i` |
+| `-o` | Save progress to a specific output file |
+| `-hide-register` | Do not print registers on each stop |
+| `-hide-disassemble` | Do not print disassembly on each stop |
+| `-bt` | Automatically print an unwind backtrace on each stop |
+| `-prefer` | Breakpoint backend: `uprobe` or `hardware` |
+| `-disable-color` | Plain text output |
+| `-show-vertual` | Show virtual (IDA-style) addresses by default |
+| `-disable-package-check` | Skip verifying that `-n` is installed |
+| `-hit-only` / `-ho` | Log breakpoint hits without stopping the target (signal-based trace) |
+| `-script` / `-sc` | Path to a script file: non-control commands run automatically on each hit |
+| `-v` | Verbose debug logging |
+| `-global-hwbrk` | Use system-wide hardware breakpoints (`pid=-1`) instead of per-thread HW breaks; try if stepping or flow misbehaves on some kernels |
+| `-mcp` | Start the HTTP MCP server on device |
+| `-mcp-port` | MCP port (default `19810`) |
+
+### Breakpoint access modes
+
+`-b` and `-vb` accept an optional access suffix on each comma-separated
+address:
+
+| Suffix | Trigger |
+| :----- | :------ |
+| `:x` | Execute (same behavior as a bare address; backend follows `-prefer`) |
+| `:r` | Read (hardware watchpoint) |
+| `:w` | Write (hardware watchpoint) |
+| `:rw` | Read or write (hardware watchpoint) |
+
+```shell
+./eDBG -n com.example.app -l libfoo.so \
+  -b 0x1234:x,0x8000:rw -prefer hardware -bt
+```
+
+Data watchpoints are four bytes wide and require four-byte-aligned addresses.
+The REPL also accepts the suffix with `hbreak`, for example `hb 0x8000:rw`;
+the existing `rwatch` and `watch` commands remain available.
+
+When the target is `linker64`, eDBG waits for the target process rather than
+waiting for `linker64` to appear as a loaded soname, then resolves the offset
+from the process maps and arms the hardware breakpoint.
+
+### Flow trace (CSV export)
+
+Single-pass **control-flow** logging: after the process hits your **first** breakpoint from `-b` or `-vb`, eDBG steps with the same engine as `step` / `next`, records each PC (virtual address + RVA when possible), and writes **`/data/local/tmp/<lib>_0x<rva>_flow.csv`** on the device. The trace stops when **PC equals the LR saved at the entry step** (function return) or when **`--max`** steps is reached.
+
+**CLI** (non-interactive: REPL does not start; flow runs then eDBG exits):
+
+```shell
+./eDBG -n com.example.app -l libfoo.so -b 0x1234 -flow
+./eDBG -n com.example.app -l libfoo.so -vb 0x1a2b3c -flow -flow-over -flow-max 5000 -v
+```
+
+| Flag | Meaning |
+| :--- | :------ |
+| `-flow` | Enable flow mode (**requires** `-b` or `-vb` with at least one address; the first address defines the trace RVA) |
+| `-flow-over` | Step **over** calls (`next`) instead of into (`step`) |
+| `-flow-max N` | Maximum steps (default `10000`) |
+| `-flow-regs` | Add `x0`–`x29`, `lr`, `sp`, `pc`, `pstate` columns to the CSV |
+| `-flow-mem X0` | Each row also logs the pointer in that register and the 8-byte value at that address (`ERR` if unreadable) |
+| `-flow-quiet` | Suppress per-step banner lines (CSV is still written) |
+
+If the library is not loaded yet, eDBG waits (up to 5 minutes) before starting the trace.
+
+**REPL** (same behaviour, manual RVA):
+
+```text
+flow 0x1234 [--over] [--max 5000] [--regs] [--mem X0] [--quiet]
+```
 
 More commands:
 
@@ -191,8 +265,8 @@ More commands:
 
 ## 💭 Implementation
 
-- All breakpoints are implemented using uprobes. It is recommended to place breakpoints on jump instructions (B-series instructions/RET/CBZ/TBNZ) to avoid introducing identifiable signatures in `/proc/maps`.
-2. The `step/next/finish/until` features utilize hardware breakpoints by default, which cannot be detected by user-mode processes. You can safely use these features without concerns. If these features are not functioning properly, consider enabling the `-disable-hw` option.
+- Uprobe breakpoints are the default for your explicit breakpoints; it is recommended to place them on jump instructions (B-series/RET/CBZ/TBNZ) where possible to reduce noise in `/proc/maps`.
+- The `step` / `next` / `finish` / `until` / **flow** paths rely on **hardware breakpoints** (not visible to ordinary user-mode inspection of the target). If stepping or flow is unreliable on a device, try **`-global-hwbrk`** or tune **`-prefer`** (`uprobe` vs `hardware`) for your main breakpoints.
 
 ## 🤝 References
 

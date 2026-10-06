@@ -172,7 +172,18 @@ int probe_linker(struct pt_regs *ctx) {
 
     struct linker_filter_t *filter = bpf_map_lookup_elem(&linker_filter, &zero);
     if (!filter) return 0;
-    if (filter->len == 0 || filter->len > 32) return 0;
+    // len == 0: target is the linker itself, already mapped. First ctor is enough.
+    if (filter->len == 0) {
+        struct data_t *data = bpf_map_lookup_elem(&event_map, &zero);
+        if (!data) return 0;
+        data->pid = bpf_get_current_pid_tgid() >> 32;
+        data->tid = (__u32)bpf_get_current_pid_tgid();
+        data->pc = 0xFFFFFFFE;
+        bpf_perf_event_output(ctx, &events, BPF_F_CURRENT_CPU, data, sizeof(struct data_t));
+        bpf_send_signal(19);
+        return 0;
+    }
+    if (filter->len > 32) return 0;
 
     __u64 soinfo_ptr = ctx->regs[0];
     __u64 str_addr = soinfo_ptr + cfg->soname_offset;

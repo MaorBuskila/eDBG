@@ -190,7 +190,7 @@ class AdbPty:
         Parameters
         ----------
         package:
-            Android package name (``-p``).
+            Android package name (``-n``).
         lib:
             Shared-library name (``-l``).
         breaks:
@@ -206,7 +206,7 @@ class AdbPty:
             self._device_bin_path,
             "-pipe",
             "-prefer", "hardware",
-            "-p", package,
+            "-n", package,
             "-l", lib,
             "-b", offsets,
         ]

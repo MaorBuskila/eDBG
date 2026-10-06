@@ -282,7 +282,11 @@ func (this *ProbeHandler) SetupLinkerProbe(linkerPath string, ctorOffset uint64,
     }
     config.Debugf("SetupLinkerProbe: linkerManager started OK")
 
-    fmt.Printf("Linker ctor probe active: waiting for %s to load...\n", filterLib)
+    if filterLib == "" {
+        fmt.Printf("Linker ctor probe active: waiting for target process (linker is already mapped)...\n")
+    } else {
+        fmt.Printf("Linker ctor probe active: waiting for %s to load...\n", filterLib)
+    }
     return nil
 }
 

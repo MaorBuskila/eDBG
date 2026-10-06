@@ -195,8 +195,22 @@ func (this *EventListener) WorkEvent(data []byte) {
 	if PC == config.LinkerCtorSentinelPC && this.client.BrkManager.IsWaitingForLoad() {
 		config.Debugf("WorkEvent: linker ctor sentinel matched! pid=%d", this.pid)
 		process.WorkPid = this.pid
+		process.WorkTid = nowTid
 		if err := this.client.BrkManager.OnLinkerCtorHit(); err != nil {
 			fmt.Printf("Linker ctor hit error: %v\n", err)
+		}
+		if config.StopOnLoad {
+			// Halt at the library constructor and HOLD: the target stays SIGSTOP'd
+			// (no SIGCONT, no NotifyContinue) until the user issues 'continue'.
+			process.StoppedPID(this.pid)
+			fmt.Printf("\n%s[Library Loaded]%s %s constructor reached (linker). pid=%d tid=%d\n",
+				config.GREEN, config.NC, this.client.BrkManager.TargetLibName, this.pid, nowTid)
+			fmt.Printf("%sExecution paused at library load; will NOT continue to any breakpoint.%s\n",
+				config.YELLOW, config.NC)
+			fmt.Printf("Set breakpoints on %s, inspect memory (x/dump), or 'continue' to resume.\n",
+				this.client.BrkManager.TargetLibName)
+			this.client.Working = false
+			return
 		}
 		syscall.Kill(int(this.pid), syscall.SIGCONT)
 		this.client.Working = false

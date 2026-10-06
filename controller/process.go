@@ -60,12 +60,21 @@ func (this *Process) GetExecPath() error {
 }
 
 func (this *Process) UpdatePidList() {
+	// If PID was provided directly and no package name, keep the existing list
+	if this.PackageName == "" && this.WorkPid != 0 {
+		return
+	}
 	this.PidList = []uint32{}
 	selfPid := uint32(os.Getpid())
 	var content string
 	var err error
 	if config.TargetUID != 0 {
-		cmd := fmt.Sprintf("ps -A -o uid,pid,name | awk '$1==%d {print $3,$2}'", config.TargetUID)
+		var cmd string
+		if this.PackageName != "" {
+			cmd = fmt.Sprintf("ps -A -o uid,pid,name | awk '$1==%d && index($3,\"%s\")==1 {print $3,$2}'", config.TargetUID, this.PackageName)
+		} else {
+			cmd = fmt.Sprintf("ps -A -o uid,pid,name | awk '$1==%d {print $3,$2}'", config.TargetUID)
+		}
 		config.Debugf("UpdatePidList: running: %s", cmd)
 		content, err = utils.RunCommand("sh", "-c", cmd)
 	} else {
@@ -95,7 +104,7 @@ func (this *Process) UpdatePidList() {
 
 
 func (this *Process) checkPackageName() error {
-	if config.DisablePackageCheck {
+	if config.DisablePackageCheck || this.PackageName == "" {
 		return nil
 	}
 	packageinfos := utils.GetPackageInfos()

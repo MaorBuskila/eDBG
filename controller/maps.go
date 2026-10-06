@@ -1,11 +1,13 @@
 package controller
 
 import (
+	"eDBG/utils"
+	"errors"
+	"fmt"
 	"io/ioutil"
 	"strings"
-    "errors"
-	"fmt"
-    "golang.org/x/exp/slices"
+
+	"golang.org/x/exp/slices"
 )
 
 
@@ -115,6 +117,29 @@ func (this *ProcMaps) ParseMapsContent(content []byte) error {
         }
     }
     return nil
+}
+
+func (this *ProcMaps) FindStackAndTls(tid uint32) (start, end uint64, name string, err error) {
+	want := fmt.Sprintf("[anon:stack_and_tls:%d]", tid)
+	for _, seg := range this.segments {
+		if seg.libPath == want {
+			return seg.baseAddr, seg.endAddr, want, nil
+		}
+	}
+	return 0, 0, "", fmt.Errorf("no %s in maps for pid %d", want, this.pid)
+}
+
+func (this *ProcMaps) Regions() []utils.MapRegion {
+	regions := make([]utils.MapRegion, 0, len(this.segments))
+	for _, seg := range this.segments {
+		regions = append(regions, utils.MapRegion{
+			Start: seg.baseAddr,
+			End:   seg.endAddr,
+			Perm:  seg.permission,
+			Path:  seg.libPath,
+		})
+	}
+	return regions
 }
 
 func (this *ProcMaps) GetLibSearchPaths() []string {

@@ -42,6 +42,35 @@ type AppConfig struct {
 	TNames        []string          `json:"tname"`
 }
 
+// flowOverFlag: -flow-over → 1, -flow-over=2 → 2 (IsBoolFlag so bare flag works)
+type flowOverFlag struct {
+	Level int
+	IsSet bool
+}
+
+func (f *flowOverFlag) String() string {
+	if !f.IsSet {
+		return "0"
+	}
+	return strconv.Itoa(f.Level)
+}
+
+func (f *flowOverFlag) Set(s string) error {
+	f.IsSet = true
+	if s == "true" {
+		f.Level = 1
+		return nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 1 || n > 3 {
+		return fmt.Errorf("flow-over level must be 1, 2, or 3")
+	}
+	f.Level = n
+	return nil
+}
+
+func (f *flowOverFlag) IsBoolFlag() bool { return true }
+
 func doUpdate(url string) error {
 	// 在 adb shell 里似乎无法联网（悲
 	resp, err := http.Get(url)
@@ -98,6 +127,7 @@ func main() {
 		outputfile      string
 		packageName     string
 		libName         string
+		pidFlag         uint
 		hiddis          bool
 		hidreg          bool
 		save            bool
@@ -117,20 +147,23 @@ func main() {
 		scriptFileShort string
 		uid             uint
 		flowMode        bool
-		flowOver        bool
+		flowOver        flowOverFlag
 		flowMax         int
 		flowRegs        bool
 		flowMem         string
 		flowQuiet       bool
+		pipeMode        bool
+		autoBacktrace   bool
 		// vertual			bool
 	)
 	var brkFlag string
 	var err error
 	doupdate = false
 	proxy = false
-	flag.StringVar(&brkFlag, "b", "", "Breakpoint addresses in hex format, e.g., [0x1234,0x5678]")
-	flag.StringVar(&vbkFlag, "vb", "", "Breakpoint virtual addresses (from IDA, etc.) in hex format, e.g., [0x1234,0x5678]")
-	flag.StringVar(&packageName, "p", "", "Target package name")
+	flag.StringVar(&brkFlag, "b", "", "Breakpoint addresses, e.g. [0x1234,0x5678:rw]. Suffix :x :r :w :rw (default x). r/w/rw are hardware watchpoints")
+	flag.StringVar(&vbkFlag, "vb", "", "Breakpoint virtual addresses (IDA RVAs), e.g. [0x1234:r]. Same :x :r :w :rw suffix as -b")
+	flag.UintVar(&pidFlag, "p", 0, "Target process PID")
+	flag.StringVar(&packageName, "n", "", "Target package name")
 	flag.StringVar(&libName, "l", "", "Target library name")
 	// 无法运行的功能，先放着
 	// flag.BoolVar(&doupdate, "update", false, "Update eDBG")
@@ -153,11 +186,13 @@ func main() {
 	flag.StringVar(&scriptFileShort, "sc", "", "Script file to execute on each breakpoint hit (shorthand)")
 	flag.UintVar(&uid, "u", 0, "Target app UID for process filtering")
 	flag.BoolVar(&flowMode, "flow", false, "Run flow trace on -b address and exit")
-	flag.BoolVar(&flowOver, "flow-over", false, "Flow: step over calls instead of into")
+	flag.Var(&flowOver, "flow-over", "Flow over level: 1=calls, 2=branches, 3=module (bare = 1)")
 	flag.IntVar(&flowMax, "flow-max", 10000, "Flow: max number of steps")
 	flag.BoolVar(&flowRegs, "flow-regs", false, "Flow: include registers in CSV")
 	flag.StringVar(&flowMem, "flow-mem", "", "Flow: dereference register each step, e.g., X0")
 	flag.BoolVar(&flowQuiet, "flow-quiet", false, "Flow: suppress per-step output")
+	flag.BoolVar(&pipeMode, "pipe", false, "Pipe mode: read commands from stdin line-by-line (no TTY required)")
+	flag.BoolVar(&autoBacktrace, "bt", false, "Print a backtrace on each stop")
 	flag.BoolVar(&config.Verbose, "v", false, "Verbose debug output")
 	flag.BoolVar(&config.GlobalHWBreak, "global-hwbrk", false, "Use system-wide (pid=-1) HW breakpoints instead of per-TID")
 	flag.Parse()
@@ -210,13 +245,13 @@ func main() {
 
 		fmt.Printf("Using Config from: %s\n", inputfile)
 	}
-	hasInitialTarget := packageName != "" || libName != ""
+	hasInitialTarget := packageName != "" || libName != "" || pidFlag != 0
 	if !mcpMode || hasInitialTarget {
-		if packageName == "" {
-			fmt.Println("No Package Specified. Use -p com.package.name")
+		if packageName == "" && pidFlag == 0 {
+			fmt.Println("No target specified. Use -n com.package.name or -p <pid>")
 			os.Exit(1)
 		}
-		if libName == "" {
+		if libName == "" && pidFlag == 0 {
 			fmt.Println("No Library Specified. Use -l libraryname.so")
 			os.Exit(1)
 		}
@@ -237,6 +272,12 @@ func main() {
 		fmt.Println("Unsupported preference. Usage: -prefer uprobe/hardware")
 		os.Exit(1)
 	}
+
+	// Stop-on-load mode: `-n <pkg> -l <lib> -prefer hardware` with no breakpoints.
+	// Halt at the target library's linker constructor without continuing to any breakpoint.
+	config.StopOnLoad = prefer == "hardware" && brkFlag == "" && vbkFlag == "" &&
+		inputfile == "" && !mcpMode && !flowMode && libName != ""
+
 	if disableColor {
 		config.GREEN = ""
 		config.YELLOW = ""
@@ -259,12 +300,18 @@ func main() {
 			fmt.Println("Create process error: ", err)
 			os.Exit(1)
 		}
-		library, err = controller.CreateLibrary(process, libName)
-		if err != nil {
-			fmt.Println("Create Library error: ", err)
-			os.Exit(1)
+		if pidFlag != 0 {
+			process.WorkPid = uint32(pidFlag)
+			process.PidList = []uint32{uint32(pidFlag)}
 		}
-		workedlib[libName] = library
+		if libName != "" {
+			library, err = controller.CreateLibrary(process, libName)
+			if err != nil {
+				fmt.Println("Create Library error: ", err)
+				os.Exit(1)
+			}
+			workedlib[libName] = library
+		}
 	}
 
 	eventListener := event.CreateEventListener(process)
@@ -274,15 +321,45 @@ func main() {
 	client := cli.CreateClient(process, library, brkManager, &cli.UserConfig{
 		Registers:  !hidreg,
 		Disasm:     !hiddis,
+		Backtrace:  autoBacktrace,
 		HitOnly:    config.HitOnly,
 		ScriptFile: actualScriptFile,
 		FlowMode:   flowMode,
+		PipeMode:   pipeMode,
 	})
 	if mcpMode {
 		client.EnableMCPMode()
 	}
-	if (inputfile == "" || mcpMode) && library != nil {
-		var brkAddrs []uint64
+	if (inputfile == "" || mcpMode) && library == nil && pidFlag != 0 {
+		// PID mode with no library: -b addresses are absolute VAs
+		var brkAddrs []breakSpec
+		var err error
+		if !mcpMode {
+			brkAddrs, err = ParseBreakPoints(brkFlag)
+			if err != nil {
+				fmt.Println("Create Breakpoints Failed: ", err)
+				os.Exit(1)
+			}
+		}
+
+		tNames, err := ParseThreadNames(threadFilters)
+		if err != nil {
+			fmt.Println("Create Thread names Failed: ", err)
+			os.Exit(1)
+		}
+		for _, name := range tNames {
+			client.AddThreadFilterName(name)
+		}
+
+		for _, spec := range brkAddrs {
+			brkAddressInfos = append(brkAddressInfos, &controller.Address{
+				Absolute: spec.Addr,
+				LibInfo:  &controller.LibraryInfo{LibName: "UNNAMED"},
+				BrkType:  spec.Type,
+			})
+		}
+	} else if (inputfile == "" || mcpMode) && library != nil {
+		var brkAddrs []breakSpec
 		var err error
 
 		if !mcpMode {
@@ -295,15 +372,15 @@ func main() {
 					os.Exit(1)
 				}
 				// 将虚拟地址转换为文件偏移
-				for _, vaddr := range virtualAddrs {
-					fmt.Printf("Converting virtual address 0x%x ", vaddr)
-					fileOffset, err := utils.ConvertVirtualOffsetToFileOffset(library.LibPath, vaddr)
+				for _, spec := range virtualAddrs {
+					fmt.Printf("Converting virtual address 0x%x ", spec.Addr)
+					fileOffset, err := utils.ConvertVirtualOffsetToFileOffset(library.LibPath, spec.Addr)
 					if err != nil {
-						fmt.Printf("Failed to convert virtual address 0x%x: %v\n", vaddr, err)
+						fmt.Printf("Failed to convert virtual address 0x%x: %v\n", spec.Addr, err)
 						os.Exit(1)
 					}
 					fmt.Printf("to file offset: 0x%x\n", fileOffset)
-					brkAddrs = append(brkAddrs, fileOffset)
+					brkAddrs = append(brkAddrs, breakSpec{Addr: fileOffset, Type: spec.Type})
 				}
 			} else { // 包含 brkFlag != "" 和两者都为空的情况
 				brkAddrs, err = ParseBreakPoints(brkFlag)
@@ -324,8 +401,10 @@ func main() {
 			client.AddThreadFilterName(name)
 		}
 
-		for _, offset := range brkAddrs {
-			brkAddressInfos = append(brkAddressInfos, controller.NewAddress(library, offset))
+		for _, spec := range brkAddrs {
+			addr := controller.NewAddress(library, spec.Addr)
+			addr.BrkType = spec.Type
+			brkAddressInfos = append(brkAddressInfos, addr)
 		}
 	} else if inputfile != "" && library != nil {
 		Config, _ := LoadConfig(inputfile)
@@ -363,14 +442,14 @@ func main() {
 		if vbkFlag != "" {
 			addrs, _ := ParseBreakPoints(vbkFlag)
 			if len(addrs) > 0 {
-				firstAddr = addrs[0]
+				firstAddr = addrs[0].Addr
 			}
 		} else {
 			addrs, _ := ParseBreakPoints(brkFlag)
 			if len(addrs) > 0 {
-				rva, convErr := utils.ConvertFileOffsetToVirtualOffset(library.LibPath, addrs[0])
+				rva, convErr := utils.ConvertFileOffsetToVirtualOffset(library.LibPath, addrs[0].Addr)
 				if convErr != nil {
-					fmt.Printf("Failed to convert file offset 0x%x to RVA: %v\n", addrs[0], convErr)
+					fmt.Printf("Failed to convert file offset 0x%x to RVA: %v\n", addrs[0].Addr, convErr)
 					os.Exit(1)
 				}
 				firstAddr = rva
@@ -414,7 +493,17 @@ func main() {
 				fmt.Println("Possible reasons:\n\n1. Some instructions do not support uprobe. Try setting breakpoints on other instructions or use until to skip the current instruction.\n2. Breakpoints with invalid addresses exist. Check the breakpoint list.\n")
 				os.Exit(1)
 			}
-			fmt.Printf("Working on %s in %s. Press Ctrl+C to quit\n", libName, packageName)
+			if pidFlag != 0 && libName == "" {
+				fmt.Printf("Working on pid %d. Press Ctrl+C to quit\n", pidFlag)
+			} else {
+				fmt.Printf("Working on %s in %s. Press Ctrl+C to quit\n", libName, packageName)
+			}
+		} else if config.StopOnLoad {
+			if err = brkManager.StartStopOnLoad(); err != nil {
+				fmt.Println("Stop-on-load init Failed: ", err)
+				os.Exit(1)
+			}
+			fmt.Printf("Stop-on-load mode: waiting for %s to load in %s. Press Ctrl+C to quit\n", libName, packageName)
 		} else {
 			fmt.Println("eDBG is not running. Use continue/run to start eDBG when breakpoints are ready.")
 		}
@@ -444,8 +533,8 @@ func main() {
 				}
 			}
 			flowArgs := []string{flowRVAStr}
-			if flowOver {
-				flowArgs = append(flowArgs, "--over")
+			if flowOver.IsSet {
+				flowArgs = append(flowArgs, "--over", strconv.Itoa(flowOver.Level))
 			}
 			if flowMax != 10000 {
 				flowArgs = append(flowArgs, "--max", strconv.Itoa(flowMax))
@@ -516,21 +605,30 @@ func main() {
 	}
 }
 
-func ParseBreakPoints(brkFlag string) ([]uint64, error) {
+type breakSpec struct {
+	Addr uint64
+	Type int // 0 = execute (follow -prefer). Else config.HW_BREAKPOINT_*.
+}
+
+func ParseBreakPoints(brkFlag string) ([]breakSpec, error) {
 	trimmed := strings.Trim(brkFlag, "[]")
 	if trimmed == "" {
-		return []uint64{}, nil
+		return []breakSpec{}, nil
 	}
 
 	addresses := strings.Split(trimmed, ",")
-	var brkAddrs []uint64
+	var brkAddrs []breakSpec
 	for _, addrStr := range addresses {
 		addrStr = strings.TrimSpace(addrStr)
-		addr, err := strconv.ParseUint(addrStr, 0, 64)
+		addrPart, tp, _, err := config.SplitAccessSuffix(addrStr)
+		if err != nil {
+			return nil, fmt.Errorf("ParseBreakPoints: %v", err)
+		}
+		addr, err := strconv.ParseUint(addrPart, 0, 64)
 		if err != nil {
 			return nil, fmt.Errorf("ParseBreakPoints: Invalid address %q: %v", addrStr, err)
 		}
-		brkAddrs = append(brkAddrs, addr)
+		brkAddrs = append(brkAddrs, breakSpec{Addr: addr, Type: tp})
 	}
 	return brkAddrs, nil
 }

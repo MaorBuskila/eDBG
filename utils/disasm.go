@@ -42,7 +42,7 @@ func DisASM(code []byte, PC uint64, process IProcess) (string, error) {
         }
 	case arm64asm.TBZ, arm64asm.TBNZ:
 		if _, _, target := getTBZTarget(inst, PC); target != 0 {
-            return fmt.Sprintf("%s %x%s", inst.Op.String(), inst.Args[0].String(), inst.Args[1].String(), target, process.GetSymbol(target)), nil
+            return fmt.Sprintf("%s %s, %s, %x%s", inst.Op.String(), inst.Args[0].String(), inst.Args[1].String(), target, process.GetSymbol(target)), nil
         }
     }
 	return inst.String(), nil
@@ -93,7 +93,15 @@ func GetTarget(pid uint32, ctx IContext) (uintptr, error) {
 
     return uintptr(getBranchTarget(inst, PC)), nil
 }
-func PredictNextPC(pid uint32, ctx IContext, Step bool) (uintptr, error) {
+// overLevel controls flow/step prediction:
+//
+//	0 = into (follow all transfers)
+//	1 = over calls (BL/BLR → PC+4)
+//	2 = over branches (all branch ops except RET → PC+4)
+//	3 = over out-of-lib (follow only if inLib(target); RET always followed)
+//
+// inLib may be nil when overLevel < 3.
+func PredictNextPC(pid uint32, ctx IContext, overLevel int, inLib func(uint64) bool) (uintptr, error) {
 	PC := ctx.GetPC()
 	pstate := ctx.GetPstate()
 	asm := make([]byte, 4)
@@ -102,82 +110,93 @@ func PredictNextPC(pid uint32, ctx IContext, Step bool) (uintptr, error) {
 		return uintptr(PC + 4), fmt.Errorf("PredictNextPC: Failed to read instruction: %v", err)
 	}
 
-    // 1. 解码ARM64指令
-    inst, err := arm64asm.Decode(asm)
-    if err != nil {
-        return uintptr(PC + 4), fmt.Errorf("PredictNextPC: Failed to disassemble instruction: %v", err)
-    }
+	inst, err := arm64asm.Decode(asm)
+	if err != nil {
+		return uintptr(PC + 4), fmt.Errorf("PredictNextPC: Failed to disassemble instruction: %v", err)
+	}
 
-    // 2. 处理分支指令
-    switch inst.Op {
-	// case :
-	// 	return uintptr(ctx.GetLR()), nil
-	case arm64asm.BR, arm64asm.RET:
-		if reg, ok := inst.Args[0].(arm64asm.Reg); ok {
-            target := ctx.GetReg(int(reg))
-            return uintptr(target), nil
-        } else {
-			return uintptr(PC + 4), nil
+	fallthroughPC := uintptr(PC + 4)
+	pick := func(op arm64asm.Op, target uint64, isRet bool) uintptr {
+		if ShouldOverFallthrough(overLevel, op, isRet, target, inLib) {
+			return fallthroughPC
 		}
-    case arm64asm.B:
+		return uintptr(target)
+	}
+
+	switch inst.Op {
+	case arm64asm.RET:
+		if reg, ok := inst.Args[0].(arm64asm.Reg); ok {
+			return pick(inst.Op, ctx.GetReg(int(reg)), true), nil
+		}
+		return fallthroughPC, nil
+	case arm64asm.BR:
+		if reg, ok := inst.Args[0].(arm64asm.Reg); ok {
+			return pick(inst.Op, ctx.GetReg(int(reg)), false), nil
+		}
+		return fallthroughPC, nil
+	case arm64asm.B:
 		cond := getCondition(inst)
-        if cond != "AL" && pstate == 0xFFFFFFFF {
-            return 0xDEADBEEF, fmt.Errorf("PredictNextPC: Missing pstate")
-        }
-		// fmt.Printf("Condition: '%s'\n", cond)
+		if cond != "AL" && pstate == 0xFFFFFFFF {
+			return 0xDEADBEEF, fmt.Errorf("PredictNextPC: Missing pstate")
+		}
 		if conditionMet(cond, pstate) {
 			if target := getBranchTarget(inst, PC); target != 0 {
-				return uintptr(target), nil
-			} else {
-				return uintptr(PC + 4), fmt.Errorf("PredictNextPC: Failed to get B target")
+				return pick(inst.Op, target, false), nil
 			}
-		} else {
-			return uintptr(PC + 4), nil
+			return fallthroughPC, fmt.Errorf("PredictNextPC: Failed to get B target")
 		}
+		return fallthroughPC, nil
 	case arm64asm.BL:
-		if Step == true {
-			if target := getBranchTarget(inst, PC); target != 0 {
-				return uintptr(target), nil
-			}else {
-				return uintptr(PC + 4), fmt.Errorf("PredictNextPC: Failed to get BL target")
-			}
-		} else {
-			return uintptr(PC + 4), nil
+		if target := getBranchTarget(inst, PC); target != 0 {
+			return pick(inst.Op, target, false), nil
 		}
+		return fallthroughPC, fmt.Errorf("PredictNextPC: Failed to get BL target")
 	case arm64asm.BLR:
-		if Step == true {
-			if reg, ok := inst.Args[0].(arm64asm.Reg); ok {
-				target := ctx.GetReg(int(reg))
-				return uintptr(target), nil
-			} else {
-				return uintptr(PC + 4), fmt.Errorf("PredictNextPC: Failed to get BLR target")
-			}
-		} else {
-			return uintptr(PC + 4), nil
+		if reg, ok := inst.Args[0].(arm64asm.Reg); ok {
+			return pick(inst.Op, ctx.GetReg(int(reg)), false), nil
 		}
+		return fallthroughPC, fmt.Errorf("PredictNextPC: Failed to get BLR target")
 	case arm64asm.CBZ, arm64asm.CBNZ:
 		if reg, target := getCBZTarget(inst, PC); target != 0 {
-            value := ctx.GetReg(reg)
-            if (inst.Op == arm64asm.CBZ && value == 0) ||
-                (inst.Op == arm64asm.CBNZ && value != 0) {
-                return uintptr(target), nil
-            }
-        }
-        return uintptr(PC + 4), nil
+			value := ctx.GetReg(reg)
+			if (inst.Op == arm64asm.CBZ && value == 0) ||
+				(inst.Op == arm64asm.CBNZ && value != 0) {
+				return pick(inst.Op, target, false), nil
+			}
+		}
+		return fallthroughPC, nil
 	case arm64asm.TBZ, arm64asm.TBNZ:
 		if reg, bit, target := getTBZTarget(inst, PC); target != 0 {
-            value := ctx.GetReg(reg)
-            bitVal := (value >> bit) & 1
-            if (inst.Op == arm64asm.TBZ && bitVal == 0) ||
-                (inst.Op == arm64asm.TBNZ && bitVal != 0) {
-                return uintptr(target), nil
-            }
-        }
-        return uintptr(PC + 4), nil
-		
-    }
-    // 3. 默认返回顺序执行地址
-    return uintptr(PC + 4), nil
+			value := ctx.GetReg(reg)
+			bitVal := (value >> bit) & 1
+			if (inst.Op == arm64asm.TBZ && bitVal == 0) ||
+				(inst.Op == arm64asm.TBNZ && bitVal != 0) {
+				return pick(inst.Op, target, false), nil
+			}
+		}
+		return fallthroughPC, nil
+	}
+	return fallthroughPC, nil
+}
+
+// ShouldOverFallthrough reports whether prediction should land at PC+4 instead of target.
+func ShouldOverFallthrough(overLevel int, op arm64asm.Op, isRet bool, target uint64, inLib func(uint64) bool) bool {
+	if overLevel <= 0 || isRet {
+		return false
+	}
+	switch overLevel {
+	case 1:
+		return op == arm64asm.BL || op == arm64asm.BLR
+	case 2:
+		return true
+	case 3:
+		if inLib == nil {
+			return op == arm64asm.BL || op == arm64asm.BLR
+		}
+		return !inLib(target)
+	default:
+		return op == arm64asm.BL || op == arm64asm.BLR
+	}
 }
 
 func getCBZTarget(inst arm64asm.Inst, PC uint64) (reg int, target uint64) {

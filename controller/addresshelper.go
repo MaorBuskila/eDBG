@@ -15,6 +15,7 @@ type Address struct {
 	Offset     uint64
 	Permission string
 	Absolute   uint64
+	BrkType    int // 0 = execute (follow -prefer). Else config.HW_BREAKPOINT_*.
 }
 
 type CachedLibInfo struct {
